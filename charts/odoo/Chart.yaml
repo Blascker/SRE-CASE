@@ -1,6 +1,6 @@
 apiVersion: v2
 name: odoo
-description: Odoo, PostgreSQL and Traefik with internal DNS routing and Vault Secrets Operator
+description: Isolated Odoo and PostgreSQL per client, with dedicated or shared ingress and Vault secrets
 type: application
-version: 0.3.0
+version: 0.4.0
 appVersion: "19.0"

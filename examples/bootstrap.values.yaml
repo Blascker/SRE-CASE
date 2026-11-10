@@ -1,8 +1,0 @@
-# Temporary first-install settings. Reach the database manager by port-forward.
-# After creating the database, upgrade with normal values (without this file).
-odoo:
-  database: ""
-  listDb: true
-  proxyMode: false
-traefik:
-  enabled: false

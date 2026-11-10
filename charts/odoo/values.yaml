@@ -38,6 +38,33 @@ networkPolicy:
         matchLabels:
           k8s-app: kube-dns
 
+# Alternative to the dedicated proxy: an existing cluster ingress controller.
+# Mutually exclusive with traefik.enabled. The controller is managed separately.
+sharedIngress:
+  enabled: false
+  className: traefik
+  host: odoo.example.com
+  tlsSecret: odoo-tls
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  controller:
+    namespace: traefik
+    podLabels:
+      app.kubernetes.io/name: traefik
+
+# One release per namespace. Quotas bound consumption; they do not reserve capacity.
+resourceQuota:
+  enabled: false
+  hard:
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.cpu: "4"
+    limits.memory: 8Gi
+    requests.storage: 60Gi
+    persistentvolumeclaims: "4"
+    pods: "6"
+
 odoo:
   image: odoo:19.0-20261102
   # One database per release. Leave empty ONLY during initial database creation.

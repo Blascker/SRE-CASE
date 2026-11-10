@@ -1,0 +1,10 @@
+odoo:
+  database: client_a
+  databaseUser: client_a
+sharedIngress:
+  host: client-a.odoo.example.com
+vault:
+  auth:
+    role: odoo-client-a
+  credentialsPath: CLIENT-A
+  tlsPath: CLIENT-A

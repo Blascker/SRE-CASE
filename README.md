@@ -1,146 +1,245 @@
 # Odoo on Kubernetes with Helm
 
-A readable Helm adaptation of the [OEC Docker Compose guide](https://oec.sh/guides/odoo-docker-compose): official Odoo and PostgreSQL images, persistent storage, health checks, a dedicated Traefik HTTPS proxy, and secrets synchronized from the existing Vault through Vault Secrets Operator (VSO). All application upstreams use internal Kubernetes Service FQDNs.
+One reusable Helm chart, three independent clients. Each client has its own Odoo,
+PostgreSQL instance, namespace, two persistent volumes, Vault identity and resource
+quota. The client configurations use an existing shared Traefik ingress controller.
 
-This is the initial implementation for the SRE challenge. Nothing has been applied to a cluster. See [DESIGN.md](DESIGN.md) for the decisions and remaining production work.
+This is a Helm adaptation of the [OEC Docker Compose guide](https://oec.sh/guides/odoo-docker-compose).
+Nothing has been applied to a cluster. [DESIGN.md](DESIGN.md) describes the architecture
+and remaining production work; [docs/clients.md](docs/clients.md) explains configuration
+and growth toward 100 clients.
+
+## Client inventory
+
+| Client | Helm release | Namespace | Database / database role | Vault role | Vault KV location | Example hostname |
+| --- | --- | --- | --- | --- | --- | --- |
+| client-a | odoo | odoo-client-a | client_a | odoo-client-a | ODOO/CLIENT-A | client-a.odoo.example.com |
+| client-b | odoo | odoo-client-b | client_b | odoo-client-b | ODOO/CLIENT-B | client-b.odoo.example.com |
+| client-c | odoo | odoo-client-c | client_c | odoo-client-c | ODOO/CLIENT-C | client-c.odoo.example.com |
+
+The release name `odoo` repeats in separate namespaces. Each release owns a separate
+PostgreSQL StatefulSet and database volume; there is no shared database server.
 
 ## Files
 
 ```text
 charts/odoo/
   Chart.yaml
-  values.yaml                    # Images, resources, DNS, Traefik and Vault settings
+  values.yaml                    # Common chart defaults
   templates/
-    odoo/
-      configmap.yaml            # Readable odoo.conf
-      deployment.yaml           # Application, config preparation and probes
-      service.yaml
-      pvc.yaml
-      networkpolicy.yaml
-    postgresql/
-      configmap.yaml            # One-time application role creation
-      statefulset.yaml
-      service.yaml
-      pvc.yaml
-      networkpolicy.yaml
-    traefik/
-      configmap.yaml            # HTTPS, WebSockets and explicit FQDN upstreams
-      deployment.yaml
-      service.yaml              # The only potentially external-facing Service
-      networkpolicy.yaml
-      vault-static-secret.yaml  # TLS certificate synchronization
-    vault/
-      connection.yaml           # Existing Vault's internal service address
-      auth.yaml                 # Kubernetes auth method and existing Vault role
-      serviceaccount.yaml       # Identity VSO uses to authenticate
-      credentials.yaml          # Shared Odoo/PostgreSQL credentials synchronization
+    odoo/                        # Application, config, Service, PVC, network policy
+    postgresql/                  # Dedicated database, initialization, PVC, network policy
+    traefik/                     # Optional dedicated proxy and TLS secret sync
+    ingress/                     # Routes through an existing shared controller
+    vault/                       # VSO connection, identity and credentials sync
     common/
-      validate.yaml             # Helm checks; produces no Kubernetes resource
+      validate.yaml              # Helm configuration checks; no Kubernetes resource
+      resourcequota.yaml         # Optional namespace consumption limits
+clients/
+  common.values.yaml             # Shared ingress and quotas for all clients
+  client-a/values.yaml           # Client A database, hostname and Vault identity
+  client-b/values.yaml
+  client-c/values.yaml
 examples/
-  bootstrap.values.yaml          # Temporary first-install configuration
-  traefik.values.yaml            # Example HTTPS proxy configuration
-  vault.values.yaml              # Vault namespace, role and paths
+  bootstrap.values.yaml          # Temporary database setup; both proxy modes disabled
+  traefik.values.yaml            # Standalone dedicated-proxy example
+  vault.values.yaml              # Standalone Vault example
 docs/
-  vault.md                       # Existing Vault prerequisites and secret contract
+  vault.md                       # Vault prerequisites, client bindings and rotation
+  clients.md                     # Configuration, ingress prerequisites and scaling
 ```
+
+## Prerequisites
+
+- Helm and kubectl, with an explicitly selected Kubernetes context.
+- A StorageClass supporting the configured volume permissions, and a CNI enforcing
+  NetworkPolicy. Check `clusterDomain` and `networkPolicy.dnsTo` against the cluster.
+- VSO and its `secrets.hashicorp.com/v1beta1` CRDs, watching all client namespaces
+  and authorized to synchronize Secrets and restart the client Odoo Deployments.
+- Existing Vault Kubernetes-auth roles bound to `odoo-vault-auth` in each client's
+  exact namespace. Create the separate policies and KV entries in
+  [docs/vault.md](docs/vault.md#client-fleet-bindings). The chart does not create them.
+- Vault TLS trust. If using a private CA, pre-create each namespace and its CA Secret
+  with key `ca.crt`, then configure `vault.server.caCertSecret` before installing.
+- An existing shared Traefik controller with IngressClass `traefik`, HTTPS entrypoint
+  `websecure`, HTTP-to-HTTPS redirect and access to the client namespaces. Match
+  `sharedIngress.controller.namespace` and `podLabels` to its actual deployment.
+  See [the ingress prerequisites](docs/clients.md#shared-ingress-prerequisites).
+- Real hostnames replacing `*.odoo.example.com`, DNS pointing to the shared controller,
+  and matching certificates/private keys in each client's Vault entry.
+
+Values are applied in this order: chart defaults → `clients/common.values.yaml` →
+`clients/<client>/values.yaml`. For environment-specific settings, add an ignored
+`-f cluster.local.yaml` after the client values on every command. During initial
+setup, keep `-f examples/bootstrap.values.yaml` **last**. Never put secrets in values.
 
 ## Validate locally
 
-Only Helm is required. These commands do not contact Kubernetes:
+These commands require only Helm and do not contact Kubernetes. Substitute the
+client name and namespace to check client-b or client-c.
 
 ```sh
-helm lint --strict charts/odoo
-helm template challenge charts/odoo --namespace odoo-challenge
-helm template challenge charts/odoo --namespace odoo-challenge \
+helm lint --strict charts/odoo --namespace odoo-client-a \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml
+
+helm template odoo charts/odoo --namespace odoo-client-a \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml
+
+helm template odoo charts/odoo --namespace odoo-client-a \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml \
   -f examples/bootstrap.values.yaml
-helm template challenge charts/odoo --namespace odoo-challenge \
-  -f examples/vault.values.yaml -f examples/traefik.values.yaml
 ```
 
-The last command checks Traefik rendering. Use an ignored `values.local.yaml` for actual cluster settings. Previous `ingress.*` settings have been replaced by `traefik.*`; the chart rejects obsolete ingress settings.
+`templates/common/validate.yaml` rejects incompatible settings, including enabling
+both proxy modes or exposing the database-manager bootstrap configuration. It emits
+no Kubernetes resource. Rendering does not verify Vault, DNS or cluster behavior.
 
-`templates/common/validate.yaml` is a Helm template containing `fail` checks. Helm evaluates it during linting/rendering and stops with a readable error for incompatible settings, such as exposing the database-manager setup through Traefik. It emits no Kubernetes object and runs no service.
+## Install a client with Helm
 
-## Vault secret synchronization
+Run from the repository root after completing the prerequisites. These commands
+change the cluster; they have not been executed here. Set `TARGET_CONTEXT` to the
+intended kubeconfig context before running them.
 
-VSO is enabled by default. Vault remains in `vault-namespace`; the connection assumes Service `vault` on HTTPS port 8200. The existing Kubernetes-auth role is `vault-role`, and the KV v2 location is mount `ODOO`, path `CLIENT-A`. Confirm the Service name, auth mount (`kubernetes`), token audience (`vault`) and Vault CA trust before deployment.
+### 1. Install with database setup enabled
 
-VSO reads these fields from `ODOO/CLIENT-A`:
+For **client-a**:
 
-| Vault field | Destination Secret | Consumer |
+```sh
+helm install odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a --create-namespace \
+  -f clients/common.values.yaml \
+  -f clients/client-a/values.yaml \
+  -f examples/bootstrap.values.yaml \
+  --wait --timeout 10m
+```
+
+For **client-b** and **client-c**, the namespace and client values change:
+
+```sh
+helm install odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-b --create-namespace \
+  -f clients/common.values.yaml \
+  -f clients/client-b/values.yaml \
+  -f examples/bootstrap.values.yaml \
+  --wait --timeout 10m
+
+helm install odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-c --create-namespace \
+  -f clients/common.values.yaml \
+  -f clients/client-c/values.yaml \
+  -f examples/bootstrap.values.yaml \
+  --wait --timeout 10m
+```
+
+Bootstrap disables both shared ingress and the dedicated proxy. VSO creates the
+credentials Secret; pods can wait until the first synchronization succeeds. If
+installation times out, inspect `VaultStaticSecret/odoo-credentials` status/events
+in the affected namespace and fix the cause before using `helm upgrade` to retry.
+Do not delete retained volumes to resolve an installation error.
+
+### 2. Create the client's database
+
+For client-a, open a local-only port-forward:
+
+```sh
+kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a port-forward service/odoo-odoo 8069:8069
+```
+
+Open `http://localhost:8069/web/database/manager`. Use that client's Vault
+`admin-password` as the master password, create database **`client_a`**, choose a
+separate administrator login/password and leave demo data disabled. Verify login
+and attachment upload/download, then stop the port-forward.
+
+Revoke the application's database-creation permission through the PostgreSQL
+administrator: `ALTER ROLE client_a NOCREATEDB;`.
+
+Repeat for the other clients using their namespace and matching database/role from
+the inventory: `client_b` and `client_c`. Initialize each database before enabling
+its normal configuration. Helm readiness alone does not prove initialization.
+
+### 3. Enable normal operation
+
+For client-a, remove the bootstrap override and reset the saved release values:
+
+```sh
+helm upgrade odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a --reset-values \
+  -f clients/common.values.yaml \
+  -f clients/client-a/values.yaml \
+  --wait --timeout 10m
+```
+
+Use the same command with `odoo-client-b` / `clients/client-b/values.yaml` and
+`odoo-client-c` / `clients/client-c/values.yaml` after initializing each client.
+Repeat any environment-specific `-f` overrides used at installation. Do not use
+`--reuse-values`: it can preserve the temporary bootstrap settings.
+
+Normal values select the client's database, disable database listing and create
+its shared Ingress and TLS synchronization resource. Verify TLS synchronization,
+HTTPS login, WebSockets and attachments at the configured hostname. The shared
+controller must provide HTTP-to-HTTPS redirection.
+
+Use this normal `helm upgrade` command for subsequent configuration changes.
+Application/module migrations require a separate backup and maintenance procedure.
+Existing installations with different release, namespace, database or PVC names
+need an explicit migration; these commands do not adopt a previous `challenge` release.
+
+## Internal services and secrets
+
+For client-a, Odoo uses `odoo-db.odoo-client-a.svc.cluster.local:5432`. Its HTTP and
+WebSocket ports are exposed through the internal Service `odoo-odoo` on 8069/8072.
+The shared controller uses Kubernetes Service references to route `/` and `/websocket`.
+Neither Odoo nor PostgreSQL creates a public load balancer.
+
+NetworkPolicies allow the configured ingress controller → Odoo → that client's
+PostgreSQL, plus DNS. Ingress-controller access matches both its namespace and pod
+labels; database access remains within the client namespace. Bootstrap allows no
+application ingress peers. Administrative port-forwarding is a separate control-plane path.
+
+VSO creates these namespace-local Secrets from each client's KV entry:
+
+| Vault fields | Destination Secret | Consumer |
 | --- | --- | --- |
-| `admin-password` | `odoo-credentials` | Odoo master password |
-| `db-password` | `odoo-credentials` | Odoo connection and PostgreSQL role initialization |
-| `postgres-password` | `odoo-credentials` | PostgreSQL administrator |
-| `tls.crt`, `tls.key` | `odoo-tls` | Traefik certificate and key |
+| `admin-password`, `db-password`, `postgres-password` | `odoo-credentials` | Odoo/PostgreSQL, with only the required keys mounted per workload |
+| `tls.crt`, `tls.key` | `odoo-tls` | Shared ingress controller, or dedicated proxy |
 
-The TLS sync resource is created only when Traefik is enabled. Both destination names remain configurable. VSO creates the Secrets in the release namespace, not the Vault namespace. Workloads continue reading the same local Secret keys; no passwords or private keys are added to Helm values. See [Vault setup](docs/vault.md) for role/policy binding, sync checks and rotation behavior.
+The TLS sync exists only when a proxy mode is enabled. Vault remains existing
+infrastructure in `vault-namespace`; its endpoint, auth mount, audience and CA trust
+must match the environment. See [the Vault runbook](docs/vault.md).
 
-## Services and internal addresses
+## Optional dedicated proxy
 
-PostgreSQL is the required external application dependency. `psql` is its command-line client. Odoo does not require Redis in this configuration; HTTP, WebSockets and scheduled jobs run in the Odoo container. SMTP is optional if sending email is required, and is currently blocked by egress policy.
+The standalone chart also supports `traefik.enabled: true` instead of shared ingress.
+To use it with client values, explicitly set `sharedIngress.enabled: false`, configure
+`traefik.host` and `traefik.service.type`, and keep Odoo proxy mode enabled. The
+dedicated proxy uses internal FQDN upstreams and provides its own HTTPS redirect.
+It needs no IngressClass or shared controller. Both proxy modes cannot be enabled
+together; obsolete `ingress.*` settings are rejected.
 
-For release `challenge`, namespace `odoo-challenge` and `clusterDomain: cluster.local`:
-
-| Connection | Address |
-| --- | --- |
-| Traefik to Odoo HTTP | `http://challenge-odoo.odoo-challenge.svc.cluster.local:8069` |
-| Traefik to Odoo WebSockets | `http://challenge-odoo.odoo-challenge.svc.cluster.local:8072` |
-| Odoo to PostgreSQL | `challenge-db.odoo-challenge.svc.cluster.local:5432` |
-
-Odoo uses a ClusterIP Service; PostgreSQL uses a headless internal Service. Neither exposes a node port or external load balancer. Traefik is the only entry point and redirects HTTP to HTTPS. For a completely internal frontend as well, set `traefik.service.type: ClusterIP`.
-
-NetworkPolicies permit only the expected application peers and DNS. They enforce allowed destinations, not whether a client used DNS or the resulting IP address. Kubernetes probes and PostgreSQL's local checks are not inter-service upstreams.
-
-## Prerequisites for a future deployment
-
-- An explicitly chosen kubeconfig context and an existing dedicated namespace.
-- A StorageClass supporting writable volumes and the configured `fsGroup` permissions.
-- A CNI that enforces NetworkPolicy, the correct `clusterDomain`, and `networkPolicy.dnsTo` matching your DNS implementation. The default assumes CoreDNS/kube-dns pods in `kube-system`; NodeLocal DNS needs its specific destination configured.
-- VSO and its `secrets.hashicorp.com/v1beta1` CRDs installed, watching the target namespace and authorized to create Secrets and restart Deployments there.
-- Existing Vault configured for Kubernetes authentication, with role `vault-role` bound to this release's auth ServiceAccount and namespace. Populate the KV entry with three different strong single-line passwords without leading/trailing whitespace. See [Vault setup](docs/vault.md).
-- Trust for the Vault server certificate. For a private CA, supply a separate CA Secret with `ca.crt` in the release namespace and set `vault.server.caCertSecret`; this trust bootstrap cannot depend on the same Vault sync.
-- For public access: load-balancer support, a DNS record pointing to Traefik, and a certificate/private key in Vault matching `traefik.host`. VSO creates the TLS Secret. This chart runs Traefik itself; no ingress controller, IngressClass or Traefik CRDs are required.
-
-## First database setup — later, when deployment is authorized
-
-The commands in this section change the cluster. They are documented for later use and have not been executed. Set `TARGET_CONTEXT` and `TARGET_NAMESPACE` explicitly first.
-
-1. Complete the existing Vault/VSO prerequisites, populate `ODOO/CLIENT-A`, and install with the temporary bootstrap settings, which keep Traefik disabled:
-
-   ```sh
-   helm upgrade --install challenge charts/odoo \
-     --kube-context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-     -f values.local.yaml -f examples/bootstrap.values.yaml
-   ```
-
-   VSO will create the local credentials Secret. Pods can remain pending until the first sync succeeds. Inspect `VaultStaticSecret/challenge-credentials` status and events without printing Secret data before proceeding.
-
-2. Access the database manager through a local-only port-forward:
-
-   ```sh
-   kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-     port-forward service/challenge-odoo 8069:8069
-   ```
-
-   Open `http://localhost:8069/web/database/manager`. Use the master password to create the database named in your normal `odoo.database` value, choose an administrator login and a separate strong login password, and leave demo data disabled. Verify login and attachment upload/download.
-
-3. Upgrade with the normal values, omitting the bootstrap file and avoiding `--reuse-values`:
-
-   ```sh
-   helm upgrade challenge charts/odoo \
-     --kube-context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-     -f values.local.yaml
-   ```
-
-   Normal settings restrict Odoo to one database and disable database listing. Revoke the application's `CREATEDB` permission after setup with `ALTER ROLE odoo NOCREATEDB;` through the database administrator; substitute the configured role name. Enable `traefik.enabled` only after setup and TLS provisioning have been verified, keeping `odoo.proxyMode: true`.
+`examples/traefik.values.yaml` demonstrates this mode for standalone chart rendering.
+The three client files use shared ingress by default.
 
 ## Day-two behavior
 
-- ConfigMap changes restart Odoo through its checksum annotation. VSO restarts Odoo when synchronized credentials change so the runtime config and database password are reloaded.
-- Traefik configuration changes trigger a rollout. VSO also restarts Traefik when its synchronized TLS data changes. Certificate issuance/renewal is external: publish renewed certificate/key data to Vault, then VSO distributes it. No ACME or Vault PKI issuance is configured by this chart.
-- PostgreSQL initialization SQL runs only on an empty data directory. Editing the Secret does **not** change passwords already stored in PostgreSQL; rotate database credentials and the Secret together.
-- Both PVCs are retained on Helm uninstall. Retention is not a backup. Reinstall with the same release name only after checking ownership of retained resources; do not delete volumes to resolve installation errors.
-- Application updates use `Recreate` and interrupt service. Database/module migrations require a separate maintenance procedure and a verified backup. Helm rollback does not reverse database changes.
-- Outbound SMTP, external APIs and other integrations are denied. Add a deliberate NetworkPolicy rule and configure an internal service FQDN when introducing another dependency.
-- Set `vault.enabled: false` only when credentials/TLS Secrets are supplied by another process. In that mode, restart Odoo manually after credential changes and use `traefik.tlsRevision` for certificate reloads.
+- Odoo configuration changes and VSO credential changes restart Odoo.
+- Shared ingress watches the client's TLS Secret. Dedicated Traefik instead restarts
+  when VSO updates its certificate. Certificate issuance and renewal are external.
+- PostgreSQL initialization runs only on an empty data directory. Secret updates do
+  not change existing SQL passwords; coordinate database and Vault rotation.
+- Both PVCs are retained on Helm uninstall, but not protected from namespace deletion.
+  Retention is not a backup. Database and filestore must be recovered together.
+- Odoo uses `Recreate`; application updates interrupt service. Both Odoo and PostgreSQL
+  are single replicas. Helm rollback cannot reverse database/module migrations.
+- SMTP and external integrations are blocked by default and need deliberate egress rules.
+- With `vault.enabled: false`, supply Secrets separately and restart Odoo after credential
+  changes. For dedicated Traefik, use `traefik.tlsRevision` to trigger a certificate reload.
+
+Adding another client means adding its values file, provisioning its Vault identity
+and secrets, then repeating the Helm install/bootstrap/upgrade steps with a new namespace.
+Backups, monitoring, automated onboarding and GitOps remain future work, as described
+in [DESIGN.md](DESIGN.md#three-clients-with-a-path-to-100).

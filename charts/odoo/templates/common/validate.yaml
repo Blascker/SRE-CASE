@@ -1,4 +1,9 @@
 {{/* Helm checks only: this file intentionally emits no Kubernetes resource. */}}
+{{- $exposed := or .Values.traefik.enabled .Values.sharedIngress.enabled }}
+{{- $tlsSecret := ternary .Values.sharedIngress.tlsSecret .Values.traefik.tlsSecret .Values.sharedIngress.enabled }}
+{{- if and .Values.traefik.enabled .Values.sharedIngress.enabled }}
+{{- fail "Enable only one of traefik.enabled and sharedIngress.enabled" }}
+{{- end }}
 {{- if not .Values.existingSecret }}
 {{- fail "existingSecret must name the Secret containing the three passwords" }}
 {{- end }}
@@ -12,7 +17,7 @@
 {{- fail "odoo.workers must be at least 1 for the WebSocket worker" }}
 {{- end }}
 {{- if hasKey .Values "ingress" }}
-{{- fail "The ingress values were replaced by traefik; update your values file" }}
+{{- fail "Use traefik for a dedicated proxy or sharedIngress for an existing ingress controller; ingress is obsolete" }}
 {{- end }}
 {{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.clusterDomain) }}
 {{- fail "clusterDomain must be a valid DNS domain, for example cluster.local" }}
@@ -20,11 +25,11 @@
 {{- if not .Values.networkPolicy.dnsTo }}
 {{- fail "networkPolicy.dnsTo must identify the cluster DNS endpoints" }}
 {{- end }}
-{{- if and .Values.traefik.enabled (or .Values.odoo.listDb (not .Values.odoo.database)) }}
-{{- fail "Complete database setup and disable listDb before enabling Traefik" }}
+{{- if and $exposed (or .Values.odoo.listDb (not .Values.odoo.database)) }}
+{{- fail "Complete database setup and disable listDb before enabling a proxy or ingress" }}
 {{- end }}
-{{- if and .Values.traefik.enabled (not .Values.odoo.proxyMode) }}
-{{- fail "odoo.proxyMode must be true when Traefik is enabled" }}
+{{- if and $exposed (not .Values.odoo.proxyMode) }}
+{{- fail "odoo.proxyMode must be true when a proxy or ingress is enabled" }}
 {{- end }}
 {{- if not (has .Values.traefik.service.type (list "ClusterIP" "LoadBalancer")) }}
 {{- fail "traefik.service.type must be ClusterIP or LoadBalancer" }}
@@ -36,6 +41,20 @@
 {{- if not .Values.traefik.tlsSecret }}
 {{- fail "traefik.tlsSecret must reference an existing TLS Secret" }}
 {{- end }}
+{{- end }}
+{{- if .Values.sharedIngress.enabled }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.sharedIngress.host) }}
+{{- fail "sharedIngress.host must be a DNS hostname" }}
+{{- end }}
+{{- if or (not .Values.sharedIngress.className) (not .Values.sharedIngress.tlsSecret) }}
+{{- fail "sharedIngress.className and sharedIngress.tlsSecret are required" }}
+{{- end }}
+{{- if or (not .Values.sharedIngress.controller.namespace) (not .Values.sharedIngress.controller.podLabels) }}
+{{- fail "sharedIngress.controller namespace and podLabels must identify the ingress controller" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.resourceQuota.enabled (not .Values.resourceQuota.hard) }}
+{{- fail "resourceQuota.hard is required when quotas are enabled" }}
 {{- end }}
 {{- if .Values.vault.enabled }}
 {{- if not (has .Values.vault.server.scheme (list "http" "https")) }}
@@ -55,10 +74,10 @@
 {{- if or (not .Values.vault.kvMount) (not .Values.vault.credentialsPath) }}
 {{- fail "vault.kvMount and vault.credentialsPath are required when VSO is enabled" }}
 {{- end }}
-{{- if and .Values.traefik.enabled (not .Values.vault.tlsPath) }}
-{{- fail "vault.tlsPath is required when Traefik and VSO are enabled" }}
+{{- if and $exposed (not .Values.vault.tlsPath) }}
+{{- fail "vault.tlsPath is required when a proxy or ingress and VSO are enabled" }}
 {{- end }}
-{{- if and .Values.traefik.enabled (eq .Values.existingSecret .Values.traefik.tlsSecret) }}
+{{- if and $exposed (eq .Values.existingSecret $tlsSecret) }}
 {{- fail "Credentials and TLS must use different destination Secret names" }}
 {{- end }}
 {{- end }}

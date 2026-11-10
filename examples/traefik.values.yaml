@@ -1,7 +1,0 @@
-# Rendering example. Replace the hostname and supply this TLS Secret before use.
-traefik:
-  enabled: true
-  host: odoo.example.com
-  tlsSecret: odoo-tls
-  service:
-    type: LoadBalancer

@@ -1,0 +1,11 @@
+# Temporary setup for client-b; apply AFTER this client's normal values.
+# Create database client_b through a local port-forward.
+# Omit this file on the normal helm upgrade --reset-values.
+odoo:
+  database: ""
+  listDb: true
+  proxyMode: false
+traefik:
+  enabled: false
+sharedIngress:
+  enabled: false

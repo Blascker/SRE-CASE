@@ -8,17 +8,31 @@ spec:
       app: odoo
       release: {{ .Release.Name }}
   policyTypes: [Ingress, Egress]
+  {{- if or .Values.traefik.enabled .Values.sharedIngress.enabled }}
   ingress:
     - from:
+        {{- if .Values.sharedIngress.enabled }}
+        # Both selectors belong to the SAME peer: namespace AND pod labels.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.sharedIngress.controller.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.sharedIngress.controller.podLabels | nindent 14 }}
+        {{- else }}
         - podSelector:
             matchLabels:
               app: traefik
               release: {{ .Release.Name }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: 8069
         - protocol: TCP
           port: 8072
+  {{- else }}
+  ingress: []
+  {{- end }}
   egress:
     - to:
         - podSelector:

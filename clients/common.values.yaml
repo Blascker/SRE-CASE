@@ -1,0 +1,13 @@
+# Fleet-wide defaults. Precedence: chart -> common -> client -> local override.
+# Each client still owns its PostgreSQL StatefulSet and both data volumes.
+traefik:
+  enabled: false
+sharedIngress:
+  enabled: true
+  className: traefik
+  controller:
+    namespace: traefik
+    podLabels:
+      app.kubernetes.io/name: traefik
+resourceQuota:
+  enabled: true
