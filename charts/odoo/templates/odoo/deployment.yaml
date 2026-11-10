@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-odoo
+spec:
+  # Odoo sessions and filestore are local to this single persistent volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: odoo
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: odoo
+        release: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/odoo/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Add the master password at runtime so it stays out of Helm values.
+        - name: prepare-config
+          image: {{ .Values.odoo.image | quote }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              cp /config/odoo.conf /runtime/odoo.conf
+              printf '\nadmin_passwd = %s\n' "$(cat /secrets/admin-password)" >> /runtime/odoo.conf
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: base-config
+              mountPath: /config
+              readOnly: true
+            - name: config
+              mountPath: /runtime
+            - name: credentials
+              mountPath: /secrets
+              readOnly: true
+      containers:
+        - name: odoo
+          image: {{ .Values.odoo.image | quote }}
+          # Preserve the official image's entrypoint and database wait behavior.
+          env:
+            - name: ODOO_RC
+              value: /etc/odoo/odoo.conf
+            - name: HOST
+              value: {{ .Release.Name }}-db.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
+            - name: PORT
+              value: "5432"
+            - name: USER
+              value: {{ .Values.odoo.databaseUser | quote }}
+            - name: PASSWORD_FILE
+              value: /secrets/db-password
+            - name: HOME
+              value: /var/lib/odoo
+          ports:
+            - name: http
+              containerPort: 8069
+            - name: websocket
+              containerPort: 8072
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: /web/health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /web/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /web/health?db_server_status=true
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.odoo.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/odoo
+              readOnly: true
+            - name: credentials
+              mountPath: /secrets
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/odoo
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: base-config
+          configMap:
+            name: {{ .Release.Name }}-odoo-config
+        - name: config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: credentials
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: admin-password
+                path: admin-password
+              - key: db-password
+                path: db-password
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-odoo-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi

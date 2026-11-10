@@ -1,0 +1,6 @@
+apiVersion: v2
+name: odoo
+description: Odoo, PostgreSQL and Traefik with internal DNS routing and Vault Secrets Operator
+type: application
+version: 0.3.0
+appVersion: "19.0"

@@ -1,0 +1,104 @@
+# VSO creates this Secret in the release namespace from vault.credentialsPath.
+# Required keys: admin-password, db-password, postgres-password.
+# admin-password is Odoo's database-manager master password, not a login password.
+existingSecret: odoo-credentials
+
+# Used in every application-to-application address: <service>.<namespace>.svc.<domain>.
+clusterDomain: cluster.local
+
+# Vault and VSO are existing infrastructure; this chart installs neither.
+# Namespace, role and KV location supplied for this environment.
+# Confirm the service name, HTTPS/CA settings, auth mount and audience before use.
+vault:
+  enabled: true
+  server:
+    service: vault
+    namespace: vault-namespace # Kubernetes namespace hosting the existing Vault
+    port: 8200
+    scheme: https
+    tlsServerName: "" # Optional certificate hostname override
+    caCertSecret: ""  # Optional local Secret with ca.crt for a private CA
+  auth:
+    mount: kubernetes # Auth mount name, without the auth/ prefix
+    role: vault-role
+    audiences: [vault] # Must match the role's configured token audience
+    namespace: "" # Vault Enterprise namespace, NOT the Kubernetes namespace
+  kvMount: ODOO # KV v2 engine mount name, without /data
+  credentialsPath: CLIENT-A # Relative to kvMount
+  tlsPath: CLIENT-A # Same entry; TLS sync selects only tls.crt and tls.key
+  refreshAfter: 1m
+
+networkPolicy:
+  # Adjust for the cluster's DNS pods (or NodeLocal DNS IP) before deployment.
+  dnsTo:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+
+odoo:
+  image: odoo:19.0-20261102
+  # One database per release. Leave empty ONLY during initial database creation.
+  database: odoo
+  databaseUser: odoo
+  listDb: false
+  proxyMode: true
+  workers: 2
+  maxCronThreads: 1
+  dbMaxconn: 8
+  limitMemorySoft: 536870912  # 512 MiB per worker
+  limitMemoryHard: 805306368 # 768 MiB per worker
+  limitTimeCpu: 60
+  limitTimeReal: 120
+  logLevel: info
+  storage:
+    size: 10Gi
+    storageClass: "" # Empty uses the cluster's default StorageClass.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+postgresql:
+  image: postgres:16-bookworm
+  storage:
+    size: 20Gi
+    storageClass: ""
+  # Starting values for the 1 GiB database container; tune from measurements.
+  sharedBuffers: 256MB
+  effectiveCacheSize: 768MB
+  workMem: 4MB
+  maintenanceWorkMem: 64MB
+  maxConnections: 100
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Dedicated proxy for this release; no ingress controller or CRDs required.
+# Enable only after database setup. Odoo and PostgreSQL remain internal.
+traefik:
+  enabled: false
+  image: traefik:v3.7.18
+  host: odoo.example.com
+  tlsSecret: odoo-tls
+  # Manual restart trigger when VSO is disabled; VSO handles TLS changes otherwise.
+  tlsRevision: "1"
+  service:
+    type: LoadBalancer # Use ClusterIP for a completely internal endpoint.
+    annotations: {}    # Provider-specific load balancer settings, if needed.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

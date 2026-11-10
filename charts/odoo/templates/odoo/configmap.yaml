@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-odoo-config
+data:
+  odoo.conf: |
+    [options]
+    addons_path = /mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+    data_dir = /var/lib/odoo
+    db_host = {{ .Release.Name }}-db.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}
+    db_port = 5432
+    db_user = {{ .Values.odoo.databaseUser }}
+    {{- if .Values.odoo.database }}
+    db_name = {{ .Values.odoo.database }}
+    dbfilter = ^{{ .Values.odoo.database }}$
+    {{- end }}
+    db_maxconn = {{ .Values.odoo.dbMaxconn }}
+    list_db = {{ ternary "True" "False" .Values.odoo.listDb }}
+    proxy_mode = {{ ternary "True" "False" .Values.odoo.proxyMode }}
+    workers = {{ .Values.odoo.workers }}
+    max_cron_threads = {{ .Values.odoo.maxCronThreads }}
+    gevent_port = 8072
+    limit_memory_soft = {{ .Values.odoo.limitMemorySoft }}
+    limit_memory_hard = {{ .Values.odoo.limitMemoryHard }}
+    limit_time_cpu = {{ .Values.odoo.limitTimeCpu }}
+    limit_time_real = {{ .Values.odoo.limitTimeReal }}
+    limit_request = 8192
+    log_level = {{ .Values.odoo.logLevel }}

@@ -1,0 +1,64 @@
+{{/* Helm checks only: this file intentionally emits no Kubernetes resource. */}}
+{{- if not .Values.existingSecret }}
+{{- fail "existingSecret must name the Secret containing the three passwords" }}
+{{- end }}
+{{- if and .Values.odoo.database (not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.database)) }}
+{{- fail "odoo.database must use lowercase letters, digits and underscores" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.databaseUser) }}
+{{- fail "odoo.databaseUser must use lowercase letters, digits and underscores" }}
+{{- end }}
+{{- if lt (int .Values.odoo.workers) 1 }}
+{{- fail "odoo.workers must be at least 1 for the WebSocket worker" }}
+{{- end }}
+{{- if hasKey .Values "ingress" }}
+{{- fail "The ingress values were replaced by traefik; update your values file" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.clusterDomain) }}
+{{- fail "clusterDomain must be a valid DNS domain, for example cluster.local" }}
+{{- end }}
+{{- if not .Values.networkPolicy.dnsTo }}
+{{- fail "networkPolicy.dnsTo must identify the cluster DNS endpoints" }}
+{{- end }}
+{{- if and .Values.traefik.enabled (or .Values.odoo.listDb (not .Values.odoo.database)) }}
+{{- fail "Complete database setup and disable listDb before enabling Traefik" }}
+{{- end }}
+{{- if and .Values.traefik.enabled (not .Values.odoo.proxyMode) }}
+{{- fail "odoo.proxyMode must be true when Traefik is enabled" }}
+{{- end }}
+{{- if not (has .Values.traefik.service.type (list "ClusterIP" "LoadBalancer")) }}
+{{- fail "traefik.service.type must be ClusterIP or LoadBalancer" }}
+{{- end }}
+{{- if .Values.traefik.enabled }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.traefik.host) }}
+{{- fail "traefik.host must be a DNS hostname" }}
+{{- end }}
+{{- if not .Values.traefik.tlsSecret }}
+{{- fail "traefik.tlsSecret must reference an existing TLS Secret" }}
+{{- end }}
+{{- end }}
+{{- if .Values.vault.enabled }}
+{{- if not (has .Values.vault.server.scheme (list "http" "https")) }}
+{{- fail "vault.server.scheme must be http or https" }}
+{{- end }}
+{{- range $key := list "service" "namespace" }}
+{{- if not (index $.Values.vault.server $key) }}
+{{- fail (printf "vault.server.%s is required when VSO is enabled" $key) }}
+{{- end }}
+{{- end }}
+{{- if or (lt (int .Values.vault.server.port) 1) (gt (int .Values.vault.server.port) 65535) }}
+{{- fail "vault.server.port must be between 1 and 65535" }}
+{{- end }}
+{{- if or (not .Values.vault.auth.mount) (not .Values.vault.auth.role) }}
+{{- fail "vault.auth.mount and vault.auth.role are required when VSO is enabled" }}
+{{- end }}
+{{- if or (not .Values.vault.kvMount) (not .Values.vault.credentialsPath) }}
+{{- fail "vault.kvMount and vault.credentialsPath are required when VSO is enabled" }}
+{{- end }}
+{{- if and .Values.traefik.enabled (not .Values.vault.tlsPath) }}
+{{- fail "vault.tlsPath is required when Traefik and VSO are enabled" }}
+{{- end }}
+{{- if and .Values.traefik.enabled (eq .Values.existingSecret .Values.traefik.tlsSecret) }}
+{{- fail "Credentials and TLS must use different destination Secret names" }}
+{{- end }}
+{{- end }}

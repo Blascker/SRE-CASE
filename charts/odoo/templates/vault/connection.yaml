@@ -1,0 +1,16 @@
+{{- if .Values.vault.enabled }}
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: {{ .Release.Name }}-vault
+  namespace: {{ .Release.Namespace }}
+spec:
+  address: {{ printf "%s://%s.%s.svc.%s:%v" .Values.vault.server.scheme .Values.vault.server.service .Values.vault.server.namespace .Values.clusterDomain .Values.vault.server.port | quote }}
+  skipTLSVerify: false
+  {{- with .Values.vault.server.tlsServerName }}
+  tlsServerName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.vault.server.caCertSecret }}
+  caCertSecretRef: {{ . | quote }}
+  {{- end }}
+{{- end }}
