@@ -4,6 +4,15 @@ Vault is existing infrastructure in `vault-namespace`. This chart creates VSO re
 
 ## Connection and identity
 
+```mermaid
+flowchart LR
+    SA["Client namespace and ServiceAccount"] --> Token["Short-lived Kubernetes token"]
+    Token --> Role["Exact Vault role binding"]
+    Role --> Policy["Read-only client KV policy"]
+    Policy --> KV["Client secret path"]
+    CA["Trusted Vault CA"] -.-> KV
+```
+
 The client-a values configure role `odoo-client-a`, KV mount `ODOO`, and path `CLIENT-A`. The chart assumes KV v2 and Service `vault` on HTTPS port 8200. Confirm those details, the Kubernetes auth mount `kubernetes`, and token audience `vault` before deployment. Configure overrides in `values.local.yaml`.
 
 For release `odoo` in namespace `odoo-client-a`:
@@ -32,6 +41,16 @@ This is configuration for the existing Vault administrator to review, not a poli
 
 ## Client fleet bindings
 
+```mermaid
+flowchart LR
+    A["odoo-client-a namespace and role"] --> PA["ODOO/data/CLIENT-A only"]
+    B["odoo-client-b namespace and role"] --> PB["ODOO/data/CLIENT-B only"]
+    C["odoo-client-c namespace and role"] --> PC["ODOO/data/CLIENT-C only"]
+    Restrict["No wildcard access across clients"] -.-> PA
+    Restrict -.-> PB
+    Restrict -.-> PC
+```
+
 The [three-client configuration](clients.md) overrides the standalone `vault-role`.
 Create a separate policy and Kubernetes auth role for each client; do not grant one
 shared role wildcard access to all client secrets.
@@ -54,6 +73,16 @@ If Vault uses a private CA, place its public CA chain in a Kubernetes Secret wit
 
 ## KV data contract
 
+```mermaid
+flowchart TB
+    KV["Client KV entry"] --> Credentials["odoo-credentials: five credential fields"]
+    KV --> TLS["odoo-tls: certificate and private key"]
+    Credentials --> Init["Initial web login: init container only"]
+    Credentials --> Odoo["Master and database password: Odoo"]
+    Credentials --> PG["Database role and administrator passwords: PostgreSQL"]
+    TLS --> Proxy["Enabled shared or dedicated proxy"]
+```
+
 Populate these keys in each client's KV entry (`ODOO/CLIENT-A`, `ODOO/CLIENT-B` or `ODOO/CLIENT-C`) through the existing Vault administration process:
 
 | Key | Purpose |
@@ -74,6 +103,15 @@ No values are committed to Git or rendered into Helm manifests. VSO creates the 
 
 ## First synchronization and access
 
+```mermaid
+flowchart TB
+    Infrastructure["Vault policies and VSO ready"] --> Sync["VSO reads client KV entry"]
+    Sync --> Secret["Create namespace-local Secrets"]
+    Secret --> Init["Pod initialization can proceed"]
+    Init --> Ready["Odoo Ready"]
+    Ready --> Verify["Verify HTTPS login and attachments"]
+```
+
 Install VSO and its compatible CRDs through the cluster's infrastructure process first. The operator must reach Vault, Kubernetes API and DNS; Vault must allow the operator's incoming connection. Application pods do not contact Vault, so their network policies need no Vault exception.
 
 Follow the [README installation steps](../README.md#install-a-client-with-helm). Pods may wait until VSO has produced the destination Secret. Inspect the `VaultStaticSecret` status, conditions and events; never print Secret payloads merely to check synchronization. The init container initializes the database before Odoo starts; verify its completion, HTTPS login and attachments after readiness.
@@ -81,6 +119,18 @@ Follow the [README installation steps](../README.md#install-a-client-with-helm).
 Helm can render the resources without an installed operator; rendering does not demonstrate successful authentication or secret synchronization. A Vault outage preserves already synchronized Secrets, but prevents updates and can block first-time deployment. Existing pods do not depend on contacting Vault per request.
 
 ## Rotation
+
+```mermaid
+flowchart TB
+    Kind{"Credential type"} -->|"Database password"| Stop["Stop writers during maintenance"]
+    Stop --> SQL["Update password in PostgreSQL"]
+    SQL --> KV["Publish matching Vault value"]
+    KV --> Sync["VSO sync and Odoo rollout"]
+    Sync --> Resume["Verify and resume writers"]
+    Kind -->|"TLS certificate"| Cert["Publish matching certificate and key"]
+    Cert --> Reload["VSO sync; proxy reload or restart"]
+    Kind -->|"Initial web login"| Web["Existing login changes are managed through Odoo"]
+```
 
 VSO polls at `refreshAfter` (default one minute). Changed credentials trigger an Odoo rollout, and changed TLS data triggers a Traefik rollout. PostgreSQL is deliberately absent from automatic restart targets.
 

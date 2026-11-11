@@ -29,6 +29,14 @@ onboarding real users.
 
 ## 1. Check cluster prerequisites
 
+```mermaid
+flowchart LR
+    Nodes["Ready nodes and available capacity"] --> Storage["Longhorn RWX and NFS support"]
+    Storage --> Metrics["Metrics API available and numerical usage"]
+    Metrics --> Ingress["Actual IngressClass and controller identity"]
+    Ingress --> Ready["Proceed to client checks"]
+```
+
 ```sh
 kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" get nodes -o wide
 kubectl --context "$TARGET_CONTEXT" get storageclass longhorn
@@ -52,6 +60,14 @@ Always match its actual namespace and pod labels before installing clients.
 
 ## 2. Check the client installation
 
+```mermaid
+flowchart TB
+    Helm["Helm release deployed"] --> Secrets["VSO synchronized"]
+    Secrets --> PVC["Odoo RWX and PostgreSQL RWO claims Bound"]
+    PVC --> Pods["Initialization completes and pods Ready"]
+    Pods --> HPA["HPA reports numerical CPU and correct limits"]
+```
+
 ```sh
 helm status odoo --kube-context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE"
 kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get pods -o wide
@@ -72,6 +88,15 @@ If using `odoo.storage.existingClaim`, inspect that application's claim instead.
 The application remains unavailable until its init container finishes successfully.
 
 ## 3. Verify automatic scale-up and scale-down
+
+```mermaid
+flowchart TB
+    Baseline["Record initial replica count"] --> Load["Bounded CPU load for 5 minutes"]
+    Load --> Up["Observe automatic growth and Ready pods"]
+    Up --> Stop["Load ends"]
+    Stop --> Wait["Allow scale-down stabilization"]
+    Wait --> Down["Observe automatic reduction toward minimum"]
+```
 
 Keep HPA enabled; do not use `kubectl scale` for this check. In one terminal, watch:
 
@@ -127,6 +152,17 @@ automatic reduction without manually changing replicas. HPA desired replicas alo
 are insufficient; the requested pods must actually become Ready.
 
 ## 4. Verify shared storage and sessions
+
+```mermaid
+flowchart TB
+    Pods["Two Ready replicas; prefer different nodes"] --> Write["Replica A creates scratch file"]
+    Write --> Read["Replica B reads and removes that file"]
+    Pods --> Login["Log in through replica A"]
+    Login --> Session["Replica B recognizes the same browser session"]
+    Session --> Attachment["Upload through A and download through B"]
+    Read --> Result["Record cross-node status and results"]
+    Attachment --> Result
+```
 
 While at least two Odoo pods are Ready, choose distinct pod names:
 
@@ -187,6 +223,14 @@ do not validate ingress routing or NetworkPolicy enforcement.
 
 ## 5. Verify the actual hostname
 
+```mermaid
+flowchart LR
+    HTTP["HTTP hostname"] --> HTTPS["HTTPS redirect and trusted certificate"]
+    HTTPS --> Login["Login and attachments through ingress"]
+    Login --> WS["WebSocket status 101"]
+    WS --> Scale["Repeat requests while HPA changes replicas"]
+```
+
 Use the client's real configured hostname and certificate:
 
 - HTTP redirects to HTTPS, and HTTPS presents the matching trusted certificate.
@@ -199,6 +243,18 @@ Check HPA, pod status and application logs together. These checks demonstrate sc
 they do not establish database, storage or ingress high availability.
 
 ## If a check fails
+
+```mermaid
+flowchart TB
+    Failure{"Observed failure"} -->|"Unknown CPU"| Metrics["Metrics API and CPU requests"]
+    Failure -->|"Pending pods"| Capacity["Capacity, quota and mount events"]
+    Failure -->|"Mount or file errors"| Storage["Longhorn, NFS and permissions"]
+    Failure -->|"Initialization blocked"| Init["VSO, PostgreSQL and init logs"]
+    Metrics --> Repeat["Fix cause and repeat the failed check"]
+    Capacity --> Repeat
+    Storage --> Repeat
+    Init --> Repeat
+```
 
 ```sh
 kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" describe hpa odoo-odoo

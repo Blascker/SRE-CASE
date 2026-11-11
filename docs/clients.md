@@ -24,6 +24,15 @@ use cluster RBAC to restrict access and a CNI that enforces NetworkPolicy.
 
 ## Configuration and local verification
 
+```mermaid
+flowchart TB
+    Defaults["Chart defaults"] --> Common["Common client values"]
+    Common --> Client["Client values"]
+    Client --> Proxy["Optional client proxy override"]
+    Proxy --> Local["Local environment overrides"]
+    Local --> Helm["Helm lint and render"]
+```
+
 Use Helm directly. The [README](../README.md#install-a-client-with-helm) is the
 installation runbook, with commands for client-a, client-b and client-c. Deployment
 also uses kubectl to inspect initialization and application status.
@@ -47,6 +56,15 @@ Kubernetes. Local rendering does not verify network enforcement or Vault policie
 
 ## Shared ingress prerequisites
 
+```mermaid
+flowchart LR
+    DNS["Client hostname and TLS certificate"] --> Controller["Existing Traefik controller"]
+    Controller -->|"IngressClass and routes"| Routes["Client Ingress"]
+    Match["Controller namespace AND pod labels"] --> Policy["Odoo NetworkPolicy"]
+    Routes --> HTTP["HTTP 8069 and WebSocket 8072"]
+    Policy --> HTTP
+```
+
 The fleet sets `sharedIngress.enabled: true` and `traefik.enabled: false`.
 Install/manage one shared Traefik ingress controller separately, with:
 
@@ -69,6 +87,17 @@ the dedicated proxy mode still uses explicit internal FQDN URLs. Odoo-to-Postgre
 uses an internal FQDN in both modes. See the [Traefik Ingress reference](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/ingress/).
 
 ## Prepare and initialize each client
+
+```mermaid
+flowchart TB
+    Prepare["Prepare Vault identity, DNS, TLS and storage"] --> Install["Install the client Helm release"]
+    Install --> Empty["Provision empty PostgreSQL database"]
+    Empty --> Check{"Already initialized?"}
+    Check -->|"No"| Init["Install base and web; set initial login"]
+    Check -->|"Yes, compatible"| Keep["Keep existing users and data"]
+    Init --> Ready["Start Odoo and verify"]
+    Keep --> Ready
+```
 
 Follow the [README Helm commands](../README.md#install-a-client-with-helm).
 They are instructions for deployment, not evidence of a running installation.
@@ -109,6 +138,16 @@ The new fleet names do not adopt or migrate an existing `challenge` release.
 
 ## Automatic Odoo scaling
 
+```mermaid
+flowchart TB
+    CPU["Average CPU relative to requests"] --> HPA["One HPA per client"]
+    HPA -->|"Higher load"| Up["Add at most one pod per minute, up to 4"]
+    HPA -->|"Lower load"| Down["Stabilize 5 minutes, then remove pods toward 1"]
+    Up --> Shared["Same client database and RWX volume"]
+    Down --> Shared
+    Budget["Connection budget and namespace quota"] -.-> HPA
+```
+
 Each client inherits an enabled CPU HPA from clients/common.values.yaml. The default
 range is one to four Odoo pods, targeting 70% average CPU utilization. A working k3s
 Metrics Server is required. Tune minReplicas, maxReplicas and the CPU target in that
@@ -147,6 +186,16 @@ the HPA in one namespace does not scale another client's Odoo.
 
 ## Only for existing RWO application volumes
 
+```mermaid
+flowchart TB
+    Existing{"Existing RWO application data?"} -->|"No"| Fresh["New RWX claim: no migration"]
+    Existing -->|"Yes"| Stop["Maintenance: stop traffic, autoscaling and writers"]
+    Stop --> Backup["Back up database and filestore"]
+    Backup --> Copy["Copy complete data directory to a new RWX claim"]
+    Copy --> Select["Set existingClaim and restore normal configuration"]
+    Select --> Verify["Verify before reopening traffic; retain old claim"]
+```
+
 This is not needed for the project's fresh installations. Use it only when bringing
 an existing application PVC with data into the new RWX configuration.
 
@@ -168,6 +217,15 @@ scale-to-zero maintenance mode. Disabling HPA alone does not stop Odoo. The char
 references the supplied claim but never copies data or removes the old retained PVC.
 
 ## Add the fourth or hundredth client
+
+```mermaid
+flowchart TB
+    New["New client values and proxy override"] --> Identity["Unique namespace, database, Vault role and paths"]
+    Identity --> Prereqs["Provision secrets, DNS and certificate"]
+    Prereqs --> Render["Validate client configuration"]
+    Render --> Install["Helm install"]
+    Install --> Verify["Verify the new client independently"]
+```
 
 Add `clients/<client-id>/values.yaml` with unique database/role names, hostname,
 Vault role and KV paths, following the three existing clients. Copy its optional Traefik

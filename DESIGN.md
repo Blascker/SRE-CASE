@@ -33,18 +33,18 @@ rejected. Metrics-based scaling and Longhorn RWX remain target-cluster checks.
 
 The three client configurations use shared ingress:
 
-```text
-Browser -- HTTPS --> Existing shared Traefik controller
-                         |
-                         +-- client-a hostname --> odoo-client-a namespace
-                         |                          Odoo (1–4 replicas) + shared RWX PVC
-                         |                            --> PostgreSQL + database PVC
-                         +-- client-b hostname --> odoo-client-b namespace
-                         |                          Odoo (1–4 replicas) + shared RWX PVC
-                         |                            --> PostgreSQL + database PVC
-                         +-- client-c hostname --> odoo-client-c namespace
-                                                    Odoo (1–4 replicas) + shared RWX PVC
-                                                      --> PostgreSQL + database PVC
+```mermaid
+flowchart TB
+    Browser["Browser"] -->|"HTTPS"| Ingress["Existing shared Traefik controller"]
+    Ingress --> A["Client A: Odoo 1 to 4 replicas"]
+    Ingress --> B["Client B: Odoo 1 to 4 replicas"]
+    Ingress --> C["Client C: Odoo 1 to 4 replicas"]
+    A --> DA["Dedicated PostgreSQL A and RWO volume"]
+    A --> FA["Client A RWX sessions and filestore"]
+    B --> DB["Dedicated PostgreSQL B and RWO volume"]
+    B --> FB["Client B RWX sessions and filestore"]
+    C --> DC["Dedicated PostgreSQL C and RWO volume"]
+    C --> FC["Client C RWX sessions and filestore"]
 ```
 
 The shared controller is managed outside this chart. Each client is installed with
@@ -53,22 +53,26 @@ documents the exact install, database initialization and upgrade commands.
 
 Optional standalone dedicated-proxy mode:
 
-```text
-Browser -- HTTPS --> Traefik Service (the only external endpoint)
-                            |
-                     Traefik Deployment (1)
-                            |
-                    internal Odoo Service FQDN
-                    :8069 HTTP / :8072 WebSockets
-                            |
-                     Odoo Deployment (1–4) ---- shared Odoo RWX PVC
-                            |
-                   internal PostgreSQL Service FQDN :5432
-                            |
-                 PostgreSQL StatefulSet (1) ---- PostgreSQL data PVC
+```mermaid
+flowchart LR
+    Browser["Browser"] -->|"HTTPS"| Traefik["Client dedicated Traefik"]
+    Traefik --> Service["Internal Odoo Service: HTTP and WebSocket"]
+    Service --> Odoo["Odoo 1 to 4 replicas with client values"]
+    Odoo --> Data["Shared client RWX volume"]
+    Odoo --> PG["Dedicated PostgreSQL and RWO volume"]
 ```
 
 ## Chart components
+
+```mermaid
+flowchart TB
+    Helm["Client Helm release"] --> App["Odoo Deployment, Service and HPA"]
+    Helm --> DB["PostgreSQL StatefulSet and Service"]
+    Helm --> Storage["Application RWX and database RWO claims"]
+    Helm --> Secrets["Vault connection, auth and sync resources"]
+    Helm --> Routing["Shared Ingress or dedicated proxy"]
+    Helm --> Controls["NetworkPolicies and ResourceQuota"]
+```
 
 | Component | Helm/Kubernetes implementation |
 | --- | --- |
@@ -86,6 +90,17 @@ Templates are grouped under `odoo/`, `postgresql/`, `traefik/`, `ingress/` and `
 
 ## Vault Secrets Operator
 
+```mermaid
+flowchart LR
+    Vault["Existing Vault: client KV path"] --> VSO["Existing VSO operator"]
+    Auth["Client ServiceAccount and bound Vault role"] --> VSO
+    VSO --> Credentials["Local credential Secret"]
+    VSO --> TLS["Local TLS Secret"]
+    Credentials --> Odoo["Odoo and initialization"]
+    Credentials --> PG["PostgreSQL"]
+    TLS --> Proxy["Enabled proxy"]
+```
+
 Vault already exists in Kubernetes namespace `vault-namespace`. This chart creates a local `VaultConnection`, `VaultAuth`, authentication ServiceAccount, and `VaultStaticSecret` resources. It installs neither Vault nor VSO. The operator and its CRDs must already exist and watch the application namespace.
 
 The standalone chart defaults to role `vault-role` and KV v2 mount/path `ODOO/CLIENT-A`. The three client files override these with roles `odoo-client-a`, `odoo-client-b`, `odoo-client-c` and paths `CLIENT-A`, `CLIENT-B`, `CLIENT-C` under mount `ODOO`. Each role must be bound to ServiceAccount `odoo-vault-auth` in its exact client namespace and read only its own path. The configured address is `https://vault.vault-namespace.svc.cluster.local:8200`, built from the service, namespace and cluster-domain values. Service name `vault`, Kubernetes auth mount `kubernetes`, audience `vault`, and KV engine version are assumptions to confirm. A private Vault CA must be supplied in a separate local trust Secret; TLS verification stays enabled. `vault.auth.namespace` is an optional Vault Enterprise namespace and is distinct from the Kubernetes namespace.
@@ -100,11 +115,32 @@ Only the operator contacts Vault. The existing application NetworkPolicies conti
 
 ## Required services
 
+```mermaid
+flowchart TB
+    Browser["Browser"] --> Proxy["HTTPS proxy"]
+    Proxy --> Odoo["Odoo HTTP, WebSocket and cron workers"]
+    Odoo --> PG["Dedicated PostgreSQL"]
+    Odoo --> Data["Shared persistent filestore and sessions"]
+    Odoo -.->|"optional; explicit egress needed"| SMTP["SMTP or integrations"]
+    Metrics["Metrics Server"] --> HPA["Application autoscaling"]
+    HPA --> Odoo
+```
+
 PostgreSQL is the only required separate application service in this baseline; `psql` is a database client, not another server. The [official Odoo image](https://hub.docker.com/_/odoo) contains the HTTP, WebSocket and scheduled-job processes. Redis and a separate queue service are not required. Persistent filestore storage remains necessary alongside the database.
 
 Traefik provides HTTPS and reverse proxying. SMTP is optional for email. Monitoring and backup systems are operational dependencies to add later. Any new dependency requires its own internal address and an explicit network rule.
 
 ## Dedicated Traefik and internal FQDN routing
+
+```mermaid
+flowchart LR
+    Browser["Browser"] --> TLS["Dedicated Traefik: HTTPS"]
+    TLS -->|"general requests"| HTTP["Odoo Service FQDN: 8069"]
+    TLS -->|"WebSocket path"| WS["Odoo Service FQDN: 8072"]
+    HTTP --> App["Client Odoo replicas"]
+    WS --> App
+    App --> DB["PostgreSQL Service FQDN: 5432"]
+```
 
 `templates/traefik/configmap.yaml` contains the listeners and routes. The [Traefik file provider](https://doc.traefik.io/traefik/reference/install-configuration/providers/others/file/) lets us specify the upstream URLs directly and keep the configuration local to this release.
 
@@ -124,6 +160,17 @@ DNS names provide service discovery; NetworkPolicies enforce the permitted desti
 
 ## Application configuration
 
+```mermaid
+flowchart TB
+    Values["Merged Helm values"] --> Public["Public odoo.conf ConfigMap"]
+    Public --> Prepare["prepare-config init container"]
+    Secret["Local credential Secret"] --> Prepare
+    Prepare --> Private["Private memory-backed runtime config"]
+    Private --> Init["Database initialization"]
+    Private --> Main["Odoo workers and cron processes"]
+    Init -->|"successful completion"| Main
+```
+
 The chart uses Odoo 20 and PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Odoo 20 defaults to a loopback HTTP listener, so the chart explicitly sets
 `http_interface = 0.0.0.0` for Kubernetes probes and proxy traffic on both 8069 and
 8072. Each pod defaults to two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
@@ -133,6 +180,20 @@ The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/20.0/e
 No custom addons are mounted yet. Future addons should be delivered in a versioned image derived from the official image, so code changes are reproducible.
 
 ## Security and initial setup
+
+```mermaid
+flowchart TB
+    Start["Non-root pod with scoped Secret mounts"] --> Config["Prepare private configuration"]
+    Config --> Lock["Connect to database and acquire advisory lock"]
+    Lock --> Version{"Existing compatible initialized database?"}
+    Version -->|"Yes"| Keep["Skip setup; preserve data and users"]
+    Version -->|"Empty database"| Init["Install base and web without demo data"]
+    Init --> Commit["Commit initial login and completion marker together"]
+    Version -->|"Schema ready; credentials pending"| Commit
+    Version -->|"Incomplete or mismatched version"| Block["Block startup; explicit recovery or migration"]
+    Keep --> Main["Start Odoo with database listing disabled"]
+    Commit --> Main
+```
 
 The chart-managed Odoo, PostgreSQL and optional dedicated Traefik workloads run as non-root with a read-only root filesystem, dropped capabilities and no service-account token. Writable data, configuration, temporary files and PostgreSQL sockets have explicit volumes. Odoo uses UID/GID 1000 with volume group permissions; PostgreSQL uses the Debian image's UID/GID 999; dedicated Traefik uses UID/GID 65532. The target storage driver must support these permissions. The external shared controller has its own security configuration and needs Kubernetes API access to watch routing resources and Secrets.
 
@@ -166,6 +227,17 @@ covers database connectivity; Helm's timeout must also allow module installation
 Public TLS terminates at Traefik. Internal HTTP and PostgreSQL connections stay inside the cluster and are network-restricted, but are not encrypted in this baseline. Add internal TLS if required by the deployment's threat model. Kubernetes Secrets also require suitable RBAC and encryption at rest. External APIs, SMTP and internet access are denied by default.
 
 ## Persistence, availability and upgrades
+
+```mermaid
+flowchart TB
+    Metrics["CPU metrics"] --> HPA["Client HPA: 1 to 4 replicas"]
+    HPA --> Pods["Odoo pods"]
+    Pods --> Shared["Shared Longhorn RWX sessions and filestore"]
+    Pods --> DB["Single PostgreSQL instance and RWO volume"]
+    Config["Pod-template change"] --> Recreate["Recreate rollout: service interruption"]
+    Recreate --> Pods
+    Note["Scaling implemented; end-to-end HA remains future work"] -.-> DB
+```
 
 Each client's Odoo Deployment has a CPU-based autoscaling/v2 HPA enabled by the
 common client values, with minReplicas=1, maxReplicas=4 and a 70% CPU utilization
@@ -212,17 +284,45 @@ The image settings accept full digest references. Resolve and pin the enabled wo
 
 ## Backup and recovery plan — not implemented yet
 
+```mermaid
+flowchart TB
+    Planned["Planned procedure"] --> Stop["Stop all Odoo writers"]
+    Stop --> Capture["Capture database and filestore as one recovery set"]
+    Capture --> Offsite["Encrypt, checksum and store outside cluster"]
+    Offsite --> Restore["Restore into separate database and volume"]
+    Restore --> Verify["Verify records, login, attachments and recovery time"]
+```
+
 Treat the database and filestore as one recovery set. For the first implementation, stop all Odoo writers, take a PostgreSQL logical backup and filestore archive, record a shared backup identifier and image version, and resume service after both captures complete. Store encrypted copies outside the cluster with checksums and retention.
 
 Restore into a separate database and volume, start the matching Odoo image, then verify login, representative records and attachment contents. Measure actual recovery time. Agree recovery-point and recovery-time targets before choosing the final schedule; scheduled backups and successful restore evidence are required before production acceptance.
 
 ## Observability and silent failures
 
+```mermaid
+flowchart TB
+    Pods["Process and database-server probes"] --> Basic["Basic readiness signal"]
+    Synthetic["Planned authenticated workflow and attachment checks"] --> Business["Business-function health"]
+    Jobs["Planned cron, mail and backup freshness checks"] --> Fresh["Detect silent failures"]
+    Basic --> Alerts["Planned dashboards and alerts"]
+    Business --> Alerts
+    Fresh --> Alerts
+```
+
 Logs go to container stdout/stderr for the cluster logging system. Dedicated Traefik emits JSON access logs without request headers; its ping probe checks proxy health, not end-to-end application behavior. Shared-controller logging and probes are configured outside the chart. Odoo liveness checks the HTTP process; readiness uses the [official health endpoint's database-server check](https://github.com/odoo/odoo/blob/20.0/addons/web/controllers/home.py). That check connects to the maintenance database and does **not** prove the customer database or business workflows are healthy.
 
 Next, integrate alerts for unavailable pods, repeated restarts, latency/errors, database connections, disk capacity and backup age. Add an authenticated synthetic workflow that reads a record and retrieves an attachment, plus freshness checks for scheduled jobs and outgoing mail. Alert delivery and restore drills need independent verification. These integrations are planned, not resources currently installed by the chart.
 
 ## Three clients with a path to 100
+
+```mermaid
+flowchart TB
+    Chart["One versioned chart"] --> Clients["Independent client configurations"]
+    Clients --> Isolated["Namespace, PostgreSQL, RWX data and Vault policy per client"]
+    Isolated --> Scale["Per-client HPA within resource budgets"]
+    Scale --> Batches["Validate and upgrade in small batches"]
+    Batches --> Future["Future GitOps and bounded cluster groups"]
+```
 
 `clients/common.values.yaml` enables shared ingress, CPU autoscaling, Longhorn RWX
 storage and a ResourceQuota. The client-a,
@@ -259,6 +359,14 @@ behavior under load, HPA reactions and node-failure recovery still require valid
 on k3s. CPU autoscaling does not establish an Odoo HA architecture.
 
 ## Next milestones
+
+```mermaid
+flowchart LR
+    Confirm["Confirm cluster prerequisites"] --> Deploy["Install and verify client behavior"]
+    Deploy --> Recovery["Implement backups and restore drills"]
+    Recovery --> Observe["Integrate monitoring and alerts"]
+    Observe --> Exercise["Exercise failures and upgrades"]
+```
 
 1. Confirm namespace, storage, cluster domain, DNS selectors, load-balancer support, Vault/VSO installation, auth binding and TLS trust.
 2. Pin image digests and run Vault sync/rotation, initialization, login, HTTPS redirect, WebSocket, FQDN resolution, network-isolation and persistence checks once deployment is authorized.

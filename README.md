@@ -20,6 +20,16 @@ check Metrics Server, automatic scale-up/down and shared storage on your cluster
 
 ## Client inventory
 
+```mermaid
+flowchart TB
+    Chart["One shared Helm chart"] --> A["client-a: odoo-client-a"]
+    Chart --> B["client-b: odoo-client-b"]
+    Chart --> C["client-c: odoo-client-c"]
+    A --> DA["Dedicated database and volumes A"]
+    B --> DB["Dedicated database and volumes B"]
+    C --> DC["Dedicated database and volumes C"]
+```
+
 | Client | Helm release | Namespace | Database / database role | Vault role | Vault KV location | Example hostname |
 | --- | --- | --- | --- | --- | --- | --- |
 | client-a | odoo | odoo-client-a | client_a | odoo-client-a | ODOO/CLIENT-A | client-a.odoo.example.com |
@@ -30,6 +40,14 @@ The release name `odoo` repeats in separate namespaces. Each release owns a sepa
 PostgreSQL StatefulSet and database volume; there is no shared database server.
 
 ## Files
+
+```mermaid
+flowchart LR
+    Chart["charts/odoo: reusable resources"] --> Helm["Helm release per client"]
+    Common["clients/common.values.yaml"] --> Helm
+    Client["clients/client-id: values and optional proxy"] --> Helm
+    Docs["README, DESIGN and docs"] -.->|"installation and operations"| Helm
+```
 
 ```text
 charts/odoo/
@@ -58,6 +76,18 @@ docs/
 ```
 
 ## Prerequisites
+
+```mermaid
+flowchart TB
+    Cluster["k3s and selected context"] --> Storage["Longhorn RWX and node NFS support"]
+    Cluster --> Metrics["Metrics Server"]
+    Cluster --> Secrets["Vault, VSO and client policies"]
+    Cluster --> Ingress["Ingress controller, DNS and TLS"]
+    Storage --> Ready["Ready for client installation"]
+    Metrics --> Ready
+    Secrets --> Ready
+    Ingress --> Ready
+```
 
 - Helm and kubectl, with an explicitly selected Kubernetes context.
 - Longhorn installed with StorageClass `longhorn` supporting ReadWriteMany (RWX).
@@ -92,6 +122,14 @@ runs automatically in an init container, with no temporary values file.
 
 ## Validate locally
 
+```mermaid
+flowchart LR
+    Values["Chart and client values"] --> Lint["helm lint"]
+    Lint --> Render["helm template"]
+    Render --> Review["Review manifests locally"]
+    Review -.-> Later["Cluster behavior verified after installation"]
+```
+
 These commands require only Helm and do not contact Kubernetes. Substitute the
 client name and namespace to check client-b or client-c.
 
@@ -108,6 +146,17 @@ both proxy modes, an empty database name or enabling database listing. It emits
 no Kubernetes resource. Rendering does not verify Vault, DNS or cluster behavior.
 
 ## Install a client with Helm
+
+```mermaid
+flowchart TB
+    Helm["helm install with client values"] --> Sync["VSO synchronizes credentials"]
+    Sync --> DB["PostgreSQL creates empty database and owner"]
+    Sync --> Config["prepare-config"]
+    Config --> Init["initialize-database"]
+    DB --> Init
+    Init --> App["Odoo becomes Ready"]
+    App --> Verify["Verify login, attachments and autoscaling"]
+```
 
 Run from the repository root after completing the prerequisites. These commands
 change the cluster; they have not been executed here. Set `TARGET_CONTEXT` to the
@@ -184,6 +233,17 @@ backup and maintenance procedure; the init container does not perform them.
 
 ### Only when importing an existing installation
 
+```mermaid
+flowchart TB
+    Existing{"Existing installation?"} -->|"No"| Fresh["Fresh Helm install: no migration"]
+    Existing -->|"Yes"| Backup["Back up database and filestore"]
+    Backup --> Version{"Odoo major version matches?"}
+    Version -->|"No"| Migrate["Migrate and validate a copy"]
+    Version -->|"Yes"| Storage["Check database, roles and volume compatibility"]
+    Migrate --> Storage
+    Storage --> Upgrade["Upgrade using the existing identities"]
+```
+
 Skip this section for the three fresh client installations. Their databases and
 volumes are created automatically by Helm and the init containers.
 
@@ -204,6 +264,16 @@ database or PVC names require an explicit migration; this does not adopt a previ
 `challenge` release.
 
 ## Automatic scaling per client
+
+```mermaid
+flowchart LR
+    Load["CPU load on client Odoo pods"] --> Metrics["Metrics Server"]
+    Metrics --> HPA["Client HPA: target 70% CPU"]
+    HPA --> Pods["1 to 4 Odoo replicas"]
+    Pods --> RWX["Shared client RWX sessions and attachments"]
+    Pods --> DB["One dedicated PostgreSQL instance"]
+    Pods -.->|"CPU measurements"| Metrics
+```
 
 The common client values enable an `autoscaling/v2` HorizontalPodAutoscaler (HPA)
 for each client's Odoo Deployment. It keeps at least one replica and scales up to
@@ -261,6 +331,18 @@ It does not establish end-to-end high availability.
 
 ## Internal services and secrets
 
+```mermaid
+flowchart TB
+    Browser["Browser"] --> Ingress["Ingress: HTTPS"]
+    Ingress --> Service["Internal Odoo Service: 8069 and 8072"]
+    Service --> Odoo["Client Odoo replicas"]
+    Odoo --> DB["Internal PostgreSQL Service: 5432"]
+    Vault["Client Vault path"] --> VSO["VSO"]
+    VSO --> Local["Namespace-local credential and TLS Secrets"]
+    Local -.-> Odoo
+    Local -.-> Ingress
+```
+
 For client-a, Odoo uses `odoo-db.odoo-client-a.svc.cluster.local:5432`. Its HTTP and
 WebSocket ports are exposed through the internal Service `odoo-odoo` on 8069/8072.
 The shared controller uses Kubernetes Service references to route `/` and `/websocket`.
@@ -284,6 +366,15 @@ must match the environment. See [the Vault runbook](docs/vault.md).
 
 ## Optional dedicated proxy
 
+```mermaid
+flowchart TB
+    Mode{"Client proxy mode"} -->|"Default"| Shared["Existing shared ingress controller"]
+    Mode -->|"traefik.values.yaml"| Dedicated["Client Traefik Deployment and Service"]
+    Shared --> Odoo["Client internal Odoo Service"]
+    Dedicated --> Odoo
+    Rule["Exactly one proxy mode enabled"] -.-> Mode
+```
+
 The standalone chart also supports `traefik.enabled: true` instead of shared ingress.
 To use it with client values, explicitly set `sharedIngress.enabled: false`, configure
 `traefik.host` and `traefik.service.type`, and keep Odoo proxy mode enabled. The
@@ -297,6 +388,18 @@ and upgrade commands. Apply local overrides after that file. Replace the dedicat
 and point DNS to its Service. The three clients use shared ingress by default.
 
 ## Day-two behavior
+
+```mermaid
+flowchart TB
+    Change{"Operational change"} -->|"Configuration or credentials"| Restart["Odoo rollout"]
+    Change -->|"TLS certificate"| TLS["Shared controller reload or dedicated proxy restart"]
+    Change -->|"Database password"| Rotate["Coordinate SQL and Vault update"]
+    Change -->|"Application or schema upgrade"| Backup["Backup and migration procedure"]
+    Restart --> Verify["Verify service and data"]
+    TLS --> Verify
+    Rotate --> Verify
+    Backup --> Verify
+```
 
 - Odoo configuration changes and VSO credential changes restart Odoo.
 - Shared ingress watches the client's TLS Secret. Dedicated Traefik instead restarts
