@@ -5,8 +5,12 @@ metadata:
 data:
   # The official Postgres image runs this ONLY when its data directory is empty.
   # Odoo gets its own role; the postgres superuser stays separate.
-  # CREATEDB allows initial setup through Odoo's database manager.
+  # Provision the empty database here; Odoo only initializes its schema.
   01-odoo.sql: |
     \getenv odoo_user ODOO_DB_USER
     \getenv odoo_password ODOO_DB_PASSWORD
-    CREATE ROLE :"odoo_user" LOGIN PASSWORD :'odoo_password' CREATEDB NOSUPERUSER NOCREATEROLE;
+    \getenv odoo_database ODOO_DATABASE
+    CREATE ROLE :"odoo_user" LOGIN PASSWORD :'odoo_password' NOCREATEDB NOSUPERUSER NOCREATEROLE;
+    CREATE DATABASE :"odoo_database" OWNER :"odoo_user" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C';
+    \connect :odoo_database
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;

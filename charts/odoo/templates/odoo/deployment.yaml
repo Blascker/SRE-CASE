@@ -18,6 +18,7 @@ spec:
         release: {{ .Release.Name }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/odoo/configmap.yaml") . | sha256sum }}
+        checksum/initialization: {{ include (print $.Template.BasePath "/odoo/initialization.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 150
@@ -29,7 +30,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Add the master password at runtime so it stays out of Helm values.
+        # Add private passwords at runtime so they stay out of Helm values.
         - name: prepare-config
           image: {{ .Values.odoo.image | quote }}
           command: ["/bin/sh", "-ec"]
@@ -38,6 +39,7 @@ spec:
               umask 077
               cp /config/odoo.conf /runtime/odoo.conf
               printf '\nadmin_passwd = %s\n' "$(cat /secrets/admin-password)" >> /runtime/odoo.conf
+              printf 'db_password = %s\n' "$(cat /secrets/db-password)" >> /runtime/odoo.conf
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -59,6 +61,38 @@ spec:
             - name: credentials
               mountPath: /secrets
               readOnly: true
+        - name: initialize-database
+          image: {{ .Values.odoo.image | quote }}
+          command: ["python3", "/opt/odoo-init/initialize.py"]
+          env:
+            - name: WAIT_SECONDS
+              value: {{ .Values.odoo.initializationWaitSeconds | quote }}
+            - name: HOME
+              value: /var/lib/odoo
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Init and main containers run sequentially, using the same capacity budget.
+          resources:
+            {{- toYaml .Values.odoo.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/odoo
+              readOnly: true
+            - name: initialization
+              mountPath: /opt/odoo-init
+              readOnly: true
+            - name: initial-admin
+              mountPath: /initial-admin
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/odoo
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: odoo
           image: {{ .Values.odoo.image | quote }}
@@ -120,6 +154,18 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: initialization
+          configMap:
+            name: {{ .Release.Name }}-odoo-initialization
+        - name: initial-admin
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: odoo-admin-login
+                path: odoo-admin-login
+              - key: odoo-admin-password
+                path: odoo-admin-password
         - name: base-config
           configMap:
             name: {{ .Release.Name }}-odoo-config

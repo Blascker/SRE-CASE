@@ -2,9 +2,16 @@
 
 ## Scope and current state
 
-This chart deploys one customer installation into a dedicated namespace: one Odoo pod, one dedicated PostgreSQL pod, separate persistent volumes, either an optional dedicated Traefik proxy or routes through a shared ingress controller, and VSO resources that synchronize secrets from the existing Vault in `vault-namespace`. Three client configurations reuse the chart; PostgreSQL is never shared between clients. It follows the service layout of the [OEC Docker Compose guide](https://oec.sh/guides/odoo-docker-compose) while using Kubernetes workloads, Secrets, probes and NetworkPolicies.
+This chart deploys one customer installation into a dedicated namespace: one Odoo pod, one dedicated PostgreSQL pod, separate persistent volumes, either an optional dedicated Traefik proxy or routes through a shared ingress controller, and VSO resources that synchronize secrets from the existing Vault in `vault-namespace`. Three client configurations reuse the chart; PostgreSQL is never shared between clients.
 
-The current milestone is a readable, locally renderable chart. Deployment, Vault authentication/synchronization, database bootstrap, storage permissions, restore behavior and application functionality remain unverified on the target cluster. This is not yet a claim of production readiness.
+The current milestone is a readable, locally renderable chart. Deployment, Vault authentication/synchronization, database initialization, storage permissions, restore behavior and application functionality remain unverified on the target cluster. This is not yet a claim of production readiness.
+
+Local verification with the configured Odoo 19 and PostgreSQL 16 images confirmed
+fresh initialization, initial web password hashing, disabled demo data, the restricted
+database role, restart behavior that preserves credentials, and refusal to reset an
+incomplete database. The temporary Docker volume needed group permissions matching
+the chart's fsGroup requirement. All three client configurations render in shared
+and dedicated proxy modes. This does not verify VSO, ingress or storage on Kubernetes.
 
 The three client configurations use shared ingress:
 
@@ -43,13 +50,13 @@ Browser -- HTTPS --> Traefik Service (the only external endpoint)
                  PostgreSQL StatefulSet (1) ---- PostgreSQL data PVC
 ```
 
-## How the Compose design maps to this chart
+## Chart components
 
-| Compose concept | Helm/Kubernetes implementation |
+| Component | Helm/Kubernetes implementation |
 | --- | --- |
 | Odoo service | `templates/odoo/deployment.yaml` and `service.yaml` |
 | PostgreSQL service | `templates/postgresql/statefulset.yaml` and headless Service |
-| Named volumes | Two retained PVCs |
+| Persistent storage | Two retained PVCs |
 | Mounted application configuration | ConfigMap plus private runtime config volume |
 | Environment credentials | VSO-created local Secrets referenced by the pods |
 | Health checks and restart policy | Startup/readiness/liveness probes and workload controllers |
@@ -67,7 +74,7 @@ The standalone chart defaults to role `vault-role` and KV v2 mount/path `ODOO/CL
 
 VSO authenticates using a short-lived token for `<release>-vault-auth` in the application namespace. The existing Vault role must bind that exact ServiceAccount/namespace and grant read access to the configured KV path. No Vault token is stored in chart values or mounted into application pods. Workload service-account token automounting remains disabled.
 
-The [VSO secret resources](https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/sources/vault) reconcile Vault data into Kubernetes Secrets. One sync selects `admin-password`, `db-password` and `postgres-password` into `existingSecret`; another selects `tls.crt` and `tls.key` into `sharedIngress.tlsSecret` or `traefik.tlsSecret`, according to the enabled proxy mode. No TLS sync is created during bootstrap. Raw Vault payloads and unrelated fields are excluded. Destination Secrets are created locally, with overwrite of unmanaged existing Secrets disabled. Secret values remain in Vault and the destination Kubernetes Secrets, so Kubernetes RBAC and encryption at rest still matter.
+The [VSO secret resources](https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/sources/vault) reconcile Vault data into Kubernetes Secrets. One sync selects `admin-password`, `db-password`, `postgres-password`, `odoo-admin-login` and `odoo-admin-password` into `existingSecret`; another selects `tls.crt` and `tls.key` into `sharedIngress.tlsSecret` or `traefik.tlsSecret`, according to the enabled proxy mode. TLS synchronization is created immediately when either proxy mode is enabled; Odoo has no ready endpoint until initialization finishes. Raw Vault payloads and unrelated fields are excluded. Destination Secrets are created locally, with overwrite of unmanaged existing Secrets disabled. Secret values remain in Vault and the destination Kubernetes Secrets, so Kubernetes RBAC and encryption at rest still matter.
 
 VSO polls every minute and restarts Odoo after credential changes. TLS changes restart only the dedicated Traefik Deployment; the shared controller watches TLS Secrets without a chart-triggered restart. VSO deliberately does not restart PostgreSQL: a restart cannot change passwords stored in SQL. Coordinate database password updates and KV updates in a maintenance window; details are in [the Vault runbook](docs/vault.md). TLS data synchronization distributes an existing certificate; issuance and renewal still happen outside this chart.
 
@@ -99,9 +106,9 @@ DNS names provide service discovery; NetworkPolicies enforce the permitted desti
 
 ## Application configuration
 
-We retain Odoo 19 from the initial plan and use PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Defaults use two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
+The chart uses Odoo 19 and PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Defaults use two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
 
-The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/19.0/entrypoint.sh) supports `PASSWORD_FILE` and waits for PostgreSQL. We keep that entrypoint. The only application-side shell code copies the public configuration and appends the master password from a Secret to a memory-backed volume. The main container mounts the resulting file read-only. The stock entrypoint can pass the database password internally as a process argument; pod access remains privileged access.
+The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/19.0/entrypoint.sh) supports `PASSWORD_FILE` and waits for PostgreSQL. We keep that entrypoint. The prepare-config init container copies the public configuration and appends the master and database passwords from a Secret to a memory-backed volume. Initialization and the main container mount that private file read-only, so the official entrypoint reads the database password from configuration. The initialize-database init container uses chart-managed Python logic and Odoo CLI commands from the same image. Initial web credentials are mounted only in that init container; pod access remains privileged access.
 
 No custom addons are mounted yet. Future addons should be delivered in a versioned image derived from the official image, so code changes are reproducible.
 
@@ -109,9 +116,28 @@ No custom addons are mounted yet. Future addons should be delivered in a version
 
 The chart-managed Odoo, PostgreSQL and optional dedicated Traefik workloads run as non-root with a read-only root filesystem, dropped capabilities and no service-account token. Writable data, configuration, temporary files and PostgreSQL sockets have explicit volumes. Odoo uses UID/GID 1000 with volume group permissions; PostgreSQL uses the Debian image's UID/GID 999; dedicated Traefik uses UID/GID 65532. The target storage driver must support these permissions. The external shared controller has its own security configuration and needs Kubernetes API access to watch routing resources and Secrets.
 
-PostgreSQL uses a separate administrator password. Its initialization SQL creates an Odoo role without superuser or role-management privileges. Temporary `CREATEDB` permission enables the database-manager bootstrap flow in the README; revoke it afterwards. The application never receives the PostgreSQL administrator password.
+PostgreSQL uses a separate administrator password. On an empty data volume its initialization SQL creates the client database and an owner role with NOCREATEDB, NOSUPERUSER and NOCREATEROLE. The application never receives the PostgreSQL administrator password. Existing volumes do not rerun that SQL; an administrator must ensure the configured database/role exist and revoke any legacy CREATEDB privilege before upgrading.
 
-Bootstrap disables both proxy modes, leaving only internal Services and administrative port-forward access. Normal configuration selects one database and disables database listing. Enabling either proxy mode while bootstrap settings are active, or with Odoo proxy mode disabled, is rejected by the chart.
+Odoo starts with its normal database restriction, database listing disabled and proxy
+mode enabled. After private configuration preparation, initialize-database waits for
+the configured database, obtains a session advisory lock and checks its schema. An
+empty database receives base and web without demo data. Initial web credentials come
+from the separate Vault keys odoo-admin-login and odoo-admin-password. Odoo starts
+serving only after the init container exits successfully.
+
+A database-local odoo_deployment_init table records pending/complete setup. The initial
+administrator update and completion marker commit in one transaction. If module
+initialization finished but credential finalization was interrupted, a retry can
+finish credentials before the main container starts. A partial module installation
+blocks startup for manual recovery; no database is dropped or automatically reset.
+An initialized existing database without the marker is accepted without changing
+users, passwords or modules. A completed marker causes future init runs to skip all
+initial setup. Initial web credentials must remain available as Secret keys for the
+pod volume, but later Vault changes do not rotate existing Odoo web passwords.
+
+The init container never performs module upgrades. Restoring or changing an Odoo
+version requires the explicit migration procedure. The initialization wait budget
+covers database connectivity; Helm's timeout must also allow module installation.
 
 Public TLS terminates at Traefik. Internal HTTP and PostgreSQL connections stay inside the cluster and are network-restricted, but are not encrypted in this baseline. Add internal TLS if required by the deployment's threat model. Kubernetes Secrets also require suitable RBAC and encryption at rest. External APIs, SMTP and internet access are denied by default.
 
@@ -140,18 +166,18 @@ Next, integrate alerts for unavailable pods, repeated restarts, latency/errors, 
 `clients/common.values.yaml` enables shared ingress and a ResourceQuota. The client-a,
 client-b and client-c directories supply separate databases, roles, hostnames and Vault
 paths. Direct Helm commands install release `odoo` in namespace `odoo-<client>`,
-applying common values before client values and any local overrides. Initial
-installation adds the bootstrap file last. After manual database creation, a normal
-`helm upgrade --reset-values` omits that file to enable ingress and disable database
-listing. The [README](README.md#install-a-client-with-helm) contains these commands;
-the [client guide](docs/clients.md) explains capacity and configuration. There is no
-shared PostgreSQL server, and adding a values directory does not deploy it automatically.
+applying common values before client values, an optional client traefik.values.yaml
+and any local overrides. Each client owns its normal values and optional proxy
+override; no temporary database setup values file is required. A normal Helm install
+provisions the database and runs the Odoo init container. The [README](README.md#install-a-client-with-helm)
+contains installation and upgrade commands; the [client guide](docs/clients.md)
+explains capacity and configuration. There is no shared PostgreSQL server, and adding
+a values directory does not deploy it automatically.
 
 Fleet ingress uses Kubernetes Service references, while standalone Traefik uses
 explicit FQDN upstream URLs. The Odoo NetworkPolicy selects the shared controller
 by namespace AND pod labels in one peer, and still allows database egress only to
-the same release's PostgreSQL in the same namespace. Bootstrap denies application
-ingress via NetworkPolicy. VSO supplies each namespace's TLS Secret; only dedicated
+the same release's PostgreSQL in the same namespace. The main application starts only after initialization succeeds. VSO supplies each namespace's TLS Secret; only dedicated
 Traefik gets a certificate-triggered rollout. Shared-controller HTTP redirects,
 timeouts, replicas and availability are platform responsibilities.
 
@@ -163,7 +189,7 @@ and ingress behavior remain unverified until cluster testing.
 Roll updates out to a small customer group before expanding. Distribute customers
 across bounded Kubernetes clusters to limit incident impact as needed. Capacity
 planning must include worker memory and database connections per customer. GitOps,
-automated database bootstrap/migrations, backup jobs and monitoring remain future
+automated fleet onboarding, database migrations, backup jobs and monitoring remain future
 work; adding directories does not provision those systems.
 
 Adding replicas is a separate design change: shared filestore, session behavior, cron execution, storage performance and failover must be tested together. CPU autoscaling alone does not establish an Odoo HA architecture.
@@ -171,7 +197,7 @@ Adding replicas is a separate design change: shared filestore, session behavior,
 ## Next milestones
 
 1. Confirm namespace, storage, cluster domain, DNS selectors, load-balancer support, Vault/VSO installation, auth binding and TLS trust.
-2. Pin image digests and run Vault sync/rotation, bootstrap, login, HTTPS redirect, WebSocket, FQDN resolution, network-isolation and persistence checks once deployment is authorized.
+2. Pin image digests and run Vault sync/rotation, initialization, login, HTTPS redirect, WebSocket, FQDN resolution, network-isolation and persistence checks once deployment is authorized.
 3. Implement backup/restore automation and collect restore evidence.
 4. Integrate monitoring, synthetic checks and alerts.
 5. Exercise failure and upgrade scenarios, then prepare the interview presentation from verified results.

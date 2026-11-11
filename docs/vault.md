@@ -4,23 +4,23 @@ Vault is existing infrastructure in `vault-namespace`. This chart creates VSO re
 
 ## Connection and identity
 
-Supplied values are role `vault-role`, KV mount `ODOO`, and path `CLIENT-A`. The chart assumes KV v2 and Service `vault` on HTTPS port 8200. Confirm those details, the Kubernetes auth mount `kubernetes`, and token audience `vault` before deployment. Configure overrides in `values.local.yaml`.
+The client-a values configure role `odoo-client-a`, KV mount `ODOO`, and path `CLIENT-A`. The chart assumes KV v2 and Service `vault` on HTTPS port 8200. Confirm those details, the Kubernetes auth mount `kubernetes`, and token audience `vault` before deployment. Configure overrides in `values.local.yaml`.
 
-For release `challenge` in namespace `odoo-challenge`:
+For release `odoo` in namespace `odoo-client-a`:
 
 | Resource | Name / value |
 | --- | --- |
-| VaultConnection | `challenge-vault` |
+| VaultConnection | `odoo-vault` |
 | Server address | `https://vault.vault-namespace.svc.cluster.local:8200` |
-| VaultAuth and authentication ServiceAccount | `challenge-vault-auth` |
-| Vault auth role | `vault-role` |
-| Bound Kubernetes ServiceAccount | `challenge-vault-auth` |
-| Bound Kubernetes namespace | `odoo-challenge` |
+| VaultAuth and authentication ServiceAccount | `odoo-vault-auth` |
+| Vault auth role | `odoo-client-a` |
+| Bound Kubernetes ServiceAccount | `odoo-vault-auth` |
+| Bound Kubernetes namespace | `odoo-client-a` |
 | Expected token audience | `vault` |
 
 The Vault administrator must configure the Kubernetes auth backend and bind the existing role to the exact application namespace and generated ServiceAccount. Changing Helm release/namespace changes that identity. The operator needs TokenRequest access for the ServiceAccount, permission to manage local Secrets and restart the Odoo/Traefik Deployments, and a watch scope covering this namespace.
 
-The role's policy needs read access to the configured KV v2 data endpoint. With the standalone chart's supplied mount/path, the policy fragment is:
+The role's policy needs read access to the configured KV v2 data endpoint. With client-a's mount/path, the policy fragment is:
 
 ```hcl
 path "ODOO/data/CLIENT-A" {
@@ -44,7 +44,7 @@ shared role wildcard access to all client secrets.
 
 Each policy uses the exact path above and `capabilities = ["read"]`. Bind each role
 to its exact namespace and ServiceAccount with the configured `vault` audience.
-Populate every KV entry with its own three passwords and matching certificate/key;
+Populate every KV entry with its own database/master passwords, initial web credentials and matching certificate/key;
 shared Secret names such as `odoo-credentials` are local to each namespace. The
 chart creates VSO resources, not these server-side Vault roles or policies.
 VSO must watch all three namespaces. Test that each identity can read its own path
@@ -54,19 +54,21 @@ If Vault uses a private CA, place its public CA chain in a Kubernetes Secret wit
 
 ## KV data contract
 
-Populate these keys in `ODOO/CLIENT-A` through the existing Vault administration process:
+Populate these keys in each client's KV entry (`ODOO/CLIENT-A`, `ODOO/CLIENT-B` or `ODOO/CLIENT-C`) through the existing Vault administration process:
 
 | Key | Purpose |
 | --- | --- |
 | `admin-password` | Odoo database-manager master password |
 | `db-password` | Odoo's PostgreSQL role password |
 | `postgres-password` | PostgreSQL administrator password |
-| `tls.crt` | PEM certificate/full chain for `traefik.host` |
+| `odoo-admin-login` | Initial Odoo web administrator login; mounted only in the init container |
+| `odoo-admin-password` | Initial Odoo web administrator password; distinct from the master password |
+| `tls.crt` | PEM certificate/full chain for the enabled proxy hostname |
 | `tls.key` | Matching PEM private key |
 
-Passwords must be strong, distinct, single-line values without leading/trailing whitespace. The Odoo web administrator login/password is chosen during database bootstrap and is separate from the master password.
+Passwords must be strong, distinct, single-line values without leading/trailing whitespace. The init container sets the initial Odoo web administrator from odoo-admin-login and odoo-admin-password only for a new installation. Existing initialized databases retain their current logins; later changes to these Vault fields do not reset web passwords. Keep both fields populated for existing deployments because the init-only Secret volume still requires them.
 
-`vault/credentials.yaml` selects the three password keys into the local `odoo-credentials` Secret. `traefik/vault-static-secret.yaml` selects the two TLS keys into a local Secret of type `kubernetes.io/tls`. The TLS resource exists when either dedicated Traefik or shared ingress is enabled. The two syncs can use separate KV paths by changing `credentialsPath` and `tlsPath` later.
+`vault/credentials.yaml` selects the five credential keys into the local `odoo-credentials` Secret. `traefik/vault-static-secret.yaml` selects the two TLS keys into a local Secret of type `kubernetes.io/tls`. The TLS resource exists when either dedicated Traefik or shared ingress is enabled. The two syncs can use separate KV paths by changing `credentialsPath` and `tlsPath` later.
 
 No values are committed to Git or rendered into Helm manifests. VSO creates the destination Secrets with `overwrite: false`; it will not silently take over an unmanaged existing Secret. Review any existing destination Secret ownership and plan its migration before enabling synchronization.
 
@@ -74,7 +76,7 @@ No values are committed to Git or rendered into Helm manifests. VSO creates the 
 
 Install VSO and its compatible CRDs through the cluster's infrastructure process first. The operator must reach Vault, Kubernetes API and DNS; Vault must allow the operator's incoming connection. Application pods do not contact Vault, so their network policies need no Vault exception.
 
-Follow the [README installation steps](../README.md#install-a-client-with-helm). Pods may wait until VSO has produced the destination Secret. Inspect the `VaultStaticSecret` status, conditions and events; never print Secret payloads merely to check synchronization. Then verify database bootstrap and login before enabling either proxy mode.
+Follow the [README installation steps](../README.md#install-a-client-with-helm). Pods may wait until VSO has produced the destination Secret. Inspect the `VaultStaticSecret` status, conditions and events; never print Secret payloads merely to check synchronization. The init container initializes the database before Odoo starts; verify its completion, HTTPS login and attachments after readiness.
 
 Helm can render the resources without an installed operator; rendering does not demonstrate successful authentication or secret synchronization. A Vault outage preserves already synchronized Secrets, but prevents updates and can block first-time deployment. Existing pods do not depend on contacting Vault per request.
 

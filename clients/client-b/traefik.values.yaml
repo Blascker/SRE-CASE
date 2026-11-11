@@ -1,6 +1,6 @@
 # Optional dedicated proxy for client-b; apply after this client's values.yaml.
 # Replace this example host and supply a matching certificate in the client's Vault entry.
-# During initial database setup, apply bootstrap.values.yaml AFTER this file.
+# Database initialization finishes before Odoo starts serving traffic.
 sharedIngress:
   enabled: false
 traefik:

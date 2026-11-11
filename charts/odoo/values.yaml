@@ -1,5 +1,6 @@
 # VSO creates this Secret in the release namespace from vault.credentialsPath.
-# Required keys: admin-password, db-password, postgres-password.
+# Required keys: admin-password, db-password, postgres-password,
+# odoo-admin-login and odoo-admin-password (initial web login, mounted only in init).
 # admin-password is Odoo's database-manager master password, not a login password.
 existingSecret: odoo-credentials
 
@@ -67,11 +68,12 @@ resourceQuota:
 
 odoo:
   image: odoo:19.0-20261102
-  # One database per release. Leave empty ONLY during initial database creation.
+  # One database per release; PostgreSQL creates it and the init container initializes it.
   database: odoo
   databaseUser: odoo
   listDb: false
   proxyMode: true
+  initializationWaitSeconds: 300
   workers: 2
   maxCronThreads: 1
   dbMaxconn: 8
@@ -111,7 +113,7 @@ postgresql:
       memory: 1Gi
 
 # Dedicated proxy for this release; no ingress controller or CRDs required.
-# Enable only after database setup. Odoo and PostgreSQL remain internal.
+# The application stays unready until initialization finishes. Services remain internal.
 traefik:
   enabled: false
   image: traefik:v3.7.18

@@ -4,7 +4,6 @@ One reusable Helm chart, three independent clients. Each client has its own Odoo
 PostgreSQL instance, namespace, two persistent volumes, Vault identity and resource
 quota. The client configurations use an existing shared Traefik ingress controller.
 
-This is a Helm adaptation of the [OEC Docker Compose guide](https://oec.sh/guides/odoo-docker-compose).
 Nothing has been applied to a cluster. [DESIGN.md](DESIGN.md) describes the architecture
 and remaining production work; [docs/clients.md](docs/clients.md) explains configuration
 and growth toward 100 clients.
@@ -27,7 +26,7 @@ charts/odoo/
   Chart.yaml
   values.yaml                    # Common chart defaults
   templates/
-    odoo/                        # Application, config, Service, PVC, network policy
+    odoo/                        # Application, database init container/config, Service, PVC, policy
     postgresql/                  # Dedicated database, initialization, PVC, network policy
     traefik/                     # Optional dedicated proxy and TLS secret sync
     ingress/                     # Routes through an existing shared controller
@@ -36,14 +35,12 @@ charts/odoo/
       validate.yaml              # Helm configuration checks; no Kubernetes resource
       resourcequota.yaml         # Optional namespace consumption limits
 clients/
-  common.values.yaml             # Shared ingress and quotas for all clients
-  client-a/values.yaml           # Client A database, hostname and Vault identity
-  client-b/values.yaml
-  client-c/values.yaml
-examples/
-  bootstrap.values.yaml          # Temporary database setup; both proxy modes disabled
-  traefik.values.yaml            # Standalone dedicated-proxy example
-  vault.values.yaml              # Standalone Vault example
+  common.values.yaml             # Shared Vault connection, ingress and quotas
+  client-a/
+    values.yaml                  # Database, hostname and Vault identity
+    traefik.values.yaml          # Optional dedicated proxy for this client
+  client-b/                      # Same two files with client B settings
+  client-c/                      # Same two files with client C settings
 docs/
   vault.md                       # Vault prerequisites, client bindings and rotation
   clients.md                     # Configuration, ingress prerequisites and scaling
@@ -69,9 +66,13 @@ docs/
   and matching certificates/private keys in each client's Vault entry.
 
 Values are applied in this order: chart defaults → `clients/common.values.yaml` →
-`clients/<client>/values.yaml`. For environment-specific settings, add an ignored
-`-f cluster.local.yaml` after the client values on every command. During initial
-setup, keep `-f examples/bootstrap.values.yaml` **last**. Never put secrets in values.
+`clients/<client>/values.yaml` → that client's optional `traefik.values.yaml` → local
+overrides. Add an ignored `-f cluster.local.yaml` after the client files on every
+command when environment overrides are needed. Never put secrets in values.
+
+Each client's `values.yaml` contains its Vault role and secret paths; shared Vault
+connection settings live in `clients/common.values.yaml`. Database initialization
+runs automatically in an init container, with no temporary values file.
 
 ## Validate locally
 
@@ -84,14 +85,10 @@ helm lint --strict charts/odoo --namespace odoo-client-a \
 
 helm template odoo charts/odoo --namespace odoo-client-a \
   -f clients/common.values.yaml -f clients/client-a/values.yaml
-
-helm template odoo charts/odoo --namespace odoo-client-a \
-  -f clients/common.values.yaml -f clients/client-a/values.yaml \
-  -f examples/bootstrap.values.yaml
 ```
 
 `templates/common/validate.yaml` rejects incompatible settings, including enabling
-both proxy modes or exposing the database-manager bootstrap configuration. It emits
+both proxy modes, an empty database name or enabling database listing. It emits
 no Kubernetes resource. Rendering does not verify Vault, DNS or cluster behavior.
 
 ## Install a client with Helm
@@ -100,9 +97,7 @@ Run from the repository root after completing the prerequisites. These commands
 change the cluster; they have not been executed here. Set `TARGET_CONTEXT` to the
 intended kubeconfig context before running them.
 
-### 1. Install with database setup enabled
-
-For **client-a**:
+Install each client independently:
 
 ```sh
 helm install odoo charts/odoo \
@@ -110,60 +105,53 @@ helm install odoo charts/odoo \
   --namespace odoo-client-a --create-namespace \
   -f clients/common.values.yaml \
   -f clients/client-a/values.yaml \
-  -f examples/bootstrap.values.yaml \
-  --wait --timeout 10m
-```
+  --wait --timeout 15m
 
-For **client-b** and **client-c**, the namespace and client values change:
-
-```sh
 helm install odoo charts/odoo \
   --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
   --namespace odoo-client-b --create-namespace \
   -f clients/common.values.yaml \
   -f clients/client-b/values.yaml \
-  -f examples/bootstrap.values.yaml \
-  --wait --timeout 10m
+  --wait --timeout 15m
 
 helm install odoo charts/odoo \
   --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
   --namespace odoo-client-c --create-namespace \
   -f clients/common.values.yaml \
   -f clients/client-c/values.yaml \
-  -f examples/bootstrap.values.yaml \
-  --wait --timeout 10m
+  --wait --timeout 15m
 ```
 
-Bootstrap disables both shared ingress and the dedicated proxy. VSO creates the
-credentials Secret; pods can wait until the first synchronization succeeds. If
-installation times out, inspect `VaultStaticSecret/odoo-credentials` status/events
-in the affected namespace and fix the cause before using `helm upgrade` to retry.
-Do not delete retained volumes to resolve an installation error.
+On an empty PostgreSQL volume, PostgreSQL creates the client's database and a
+restricted owner role with `NOCREATEDB`. The Odoo pod then prepares its private
+configuration and runs `initialize-database` using the same Odoo image and filestore.
+The init container waits for its database, installs `base` and `web` without demo
+data, and sets the initial administrator login/password from Vault keys
+`odoo-admin-login` and `odoo-admin-password`. The main Odoo container starts only
+after initialization completes. Database listing stays disabled throughout.
 
-### 2. Create the client's database
+An already initialized database is left unchanged. A database-local completion
+marker prevents initial passwords from being reapplied on restart. If initialization
+finishes but credential setup is interrupted, the next attempt finalizes credentials
+before Odoo can start. Partial module installation blocks startup for manual recovery;
+the init container never drops a database or automatically runs module upgrades.
 
-For client-a, open a local-only port-forward:
+VSO must synchronize all required credentials before the pod can initialize. If
+installation times out, inspect the affected namespace without printing Secret data:
 
 ```sh
 kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
-  --namespace odoo-client-a port-forward service/odoo-odoo 8069:8069
+  --namespace odoo-client-a get vaultstaticsecret
+kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a logs deployment/odoo-odoo -c initialize-database
 ```
 
-Open `http://localhost:8069/web/database/manager`. Use that client's Vault
-`admin-password` as the master password, create database **`client_a`**, choose a
-separate administrator login/password and leave demo data disabled. Verify login
-and attachment upload/download, then stop the port-forward.
+After readiness, verify HTTPS login using the initial web credentials, WebSockets,
+and attachment upload/download. Readiness alone does not prove business workflows.
+Changing the initial web credentials in Vault later does not reset an existing Odoo
+login; manage subsequent password changes through Odoo.
 
-Revoke the application's database-creation permission through the PostgreSQL
-administrator: `ALTER ROLE client_a NOCREATEDB;`.
-
-Repeat for the other clients using their namespace and matching database/role from
-the inventory: `client_b` and `client_c`. Initialize each database before enabling
-its normal configuration. Helm readiness alone does not prove initialization.
-
-### 3. Enable normal operation
-
-For client-a, remove the bootstrap override and reset the saved release values:
+For subsequent configuration changes, use normal values with `helm upgrade`:
 
 ```sh
 helm upgrade odoo charts/odoo \
@@ -171,23 +159,20 @@ helm upgrade odoo charts/odoo \
   --namespace odoo-client-a --reset-values \
   -f clients/common.values.yaml \
   -f clients/client-a/values.yaml \
-  --wait --timeout 10m
+  --wait --timeout 15m
 ```
 
-Use the same command with `odoo-client-b` / `clients/client-b/values.yaml` and
-`odoo-client-c` / `clients/client-c/values.yaml` after initializing each client.
-Repeat any environment-specific `-f` overrides used at installation. Do not use
-`--reuse-values`: it can preserve the temporary bootstrap settings.
+Substitute the client namespace and values file for client-b or client-c. Repeat
+all environment-specific overrides. Database/module migrations require a separate
+backup and maintenance procedure; the init container does not perform them.
 
-Normal values select the client's database, disable database listing and create
-its shared Ingress and TLS synchronization resource. Verify TLS synchronization,
-HTTPS login, WebSockets and attachments at the configured hostname. The shared
-controller must provide HTTP-to-HTTPS redirection.
-
-Use this normal `helm upgrade` command for subsequent configuration changes.
-Application/module migrations require a separate backup and maintenance procedure.
-Existing installations with different release, namespace, database or PVC names
-need an explicit migration; these commands do not adopt a previous `challenge` release.
+For existing PostgreSQL volumes, initialization SQL does not run again. Confirm the
+configured database and owner already exist, revoke any legacy `CREATEDB` privilege
+through the database administrator, and add the two initial web credential keys to
+Vault before upgrading. Existing initialized databases keep their current logins.
+An existing incomplete database needs manual recovery. Different release, namespace,
+database or PVC names require an explicit migration; this does not adopt a previous
+`challenge` release.
 
 ## Internal services and secrets
 
@@ -198,14 +183,14 @@ Neither Odoo nor PostgreSQL creates a public load balancer.
 
 NetworkPolicies allow the configured ingress controller → Odoo → that client's
 PostgreSQL, plus DNS. Ingress-controller access matches both its namespace and pod
-labels; database access remains within the client namespace. Bootstrap allows no
-application ingress peers. Administrative port-forwarding is a separate control-plane path.
+labels; database access remains within the client namespace. Administrative port-forwarding is a separate control-plane path.
 
 VSO creates these namespace-local Secrets from each client's KV entry:
 
 | Vault fields | Destination Secret | Consumer |
 | --- | --- | --- |
 | `admin-password`, `db-password`, `postgres-password` | `odoo-credentials` | Odoo/PostgreSQL, with only the required keys mounted per workload |
+| `odoo-admin-login`, `odoo-admin-password` | `odoo-credentials` | Database init container only; initial Odoo web administrator |
 | `tls.crt`, `tls.key` | `odoo-tls` | Shared ingress controller, or dedicated proxy |
 
 The TLS sync exists only when a proxy mode is enabled. Vault remains existing
@@ -221,8 +206,10 @@ dedicated proxy uses internal FQDN upstreams and provides its own HTTPS redirect
 It needs no IngressClass or shared controller. Both proxy modes cannot be enabled
 together; obsolete `ingress.*` settings are rejected.
 
-`examples/traefik.values.yaml` demonstrates this mode for standalone chart rendering.
-The three client files use shared ingress by default.
+Each client has its own `traefik.values.yaml` for this mode. Include, for example,
+`-f clients/client-a/traefik.values.yaml` after its normal values in both install
+and upgrade commands. Apply local overrides after that file. Replace the dedicated proxy hostname before use
+and point DNS to its Service. The three clients use shared ingress by default.
 
 ## Day-two behavior
 
@@ -240,6 +227,6 @@ The three client files use shared ingress by default.
   changes. For dedicated Traefik, use `traefik.tlsRevision` to trigger a certificate reload.
 
 Adding another client means adding its values file, provisioning its Vault identity
-and secrets, then repeating the Helm install/bootstrap/upgrade steps with a new namespace.
+and secrets, then repeating the Helm install and upgrade steps with a new namespace.
 Backups, monitoring, automated onboarding and GitOps remain future work, as described
 in [DESIGN.md](DESIGN.md#three-clients-with-a-path-to-100).

@@ -1,5 +1,18 @@
 # Fleet-wide defaults. Precedence: chart -> common -> client -> local override.
 # Each client still owns its PostgreSQL StatefulSet and both data volumes.
+vault:
+  enabled: true
+  server:
+    service: vault
+    namespace: vault-namespace
+    port: 8200
+    scheme: https
+    caCertSecret: "" # Private CA trust Secret must exist in each client namespace.
+  auth:
+    mount: kubernetes
+    audiences: [vault]
+  kvMount: ODOO
+# Each client's values.yaml supplies its own Vault role and KV paths.
 traefik:
   enabled: false
 sharedIngress:

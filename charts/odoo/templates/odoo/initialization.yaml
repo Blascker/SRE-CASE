@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-odoo-initialization
+data:
+  initialize.py: |
+    import configparser
+    import os
+    from pathlib import Path
+    import subprocess
+    import time
+
+    import psycopg2
+
+    configuration = configparser.RawConfigParser()
+    configuration.read('/etc/odoo/odoo.conf')
+    options = configuration['options']
+    database = options['db_name']
+    deadline = time.monotonic() + int(os.environ['WAIT_SECONDS'])
+    while True:
+        try:
+            connection = psycopg2.connect(
+                host=options['db_host'], port=options['db_port'], dbname=database,
+                user=options['db_user'], password=options['db_password'], connect_timeout=5,
+            )
+            break
+        except psycopg2.OperationalError:
+            if time.monotonic() >= deadline:
+                raise SystemExit('Database is not available; check PostgreSQL and credential synchronization.')
+            time.sleep(5)
+
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            # Serialize initializers for this database; released when the session closes.
+            cursor.execute('SELECT pg_try_advisory_lock(192023, 1)')
+            if not cursor.fetchone()[0]:
+                raise SystemExit('Another database initializer is running; retry after it finishes.')
+            cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            tables = {row[0] for row in cursor.fetchall()}
+
+            def initialized():
+                cursor.execute("SELECT to_regclass('public.ir_module_module')")
+                if cursor.fetchone()[0] is None:
+                    return False
+                cursor.execute("SELECT name FROM ir_module_module WHERE name IN ('base', 'web') AND state = 'installed'")
+                if {row[0] for row in cursor.fetchall()} != {'base', 'web'}:
+                    return False
+                cursor.execute("SELECT count(*) FROM ir_module_module WHERE state IN ('to install', 'to upgrade', 'to remove')")
+                return cursor.fetchone()[0] == 0
+
+            if 'odoo_deployment_init' not in tables:
+                if tables:
+                    if not initialized():
+                        raise SystemExit('Existing database is incomplete; manual recovery is required. No data was reset.')
+                    print('Existing Odoo database found; keeping its users, passwords and modules.', flush=True)
+                    raise SystemExit(0)
+                cursor.execute("CREATE TABLE odoo_deployment_init (singleton boolean PRIMARY KEY CHECK (singleton), state text NOT NULL CHECK (state IN ('pending', 'complete')))")
+                cursor.execute("INSERT INTO odoo_deployment_init VALUES (true, 'pending')")
+            cursor.execute('SELECT state FROM odoo_deployment_init WHERE singleton = true')
+            row = cursor.fetchone()
+            if row is None:
+                raise SystemExit('Initialization marker is invalid; manual recovery is required.')
+            if row[0] == 'complete':
+                if not initialized():
+                    raise SystemExit('Database modules are not ready; use the explicit recovery/migration procedure.')
+                print('Odoo initialization already complete; no changes made.', flush=True)
+                raise SystemExit(0)
+
+            # Read credentials only for initial setup; never pass passwords as CLI arguments.
+            for key in ('odoo-admin-login', 'odoo-admin-password'):
+                value = Path('/initial-admin', key).read_text().rstrip('\n')
+                if not value or value != value.strip() or '\n' in value or '\r' in value:
+                    raise SystemExit('Initial web credentials must be nonempty single-line values without surrounding whitespace.')
+
+            cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'odoo_deployment_init'")
+            if not cursor.fetchall():
+                print('Initializing a new Odoo database without demo data.', flush=True)
+                subprocess.run([
+                    'odoo', '--config=/etc/odoo/odoo.conf', '--database=' + database,
+                    '--init=base,web', '--without-demo', '--stop-after-init',
+                    '--no-http', '--workers=0', '--max-cron-threads=0',
+                ], check=True)
+            if not initialized():
+                raise SystemExit('Initialization is incomplete; inspect init logs and recover manually. No data was reset.')
+
+            # Credential changes and completion marker commit together. If interrupted,
+            # the next attempt can finalize credentials before the application starts.
+            subprocess.run([
+                'odoo', 'shell', '--config=/etc/odoo/odoo.conf', '--database=' + database,
+                '--no-http', '--workers=0', '--max-cron-threads=0',
+            ], input="""
+    from pathlib import Path
+    login = Path('/initial-admin/odoo-admin-login').read_text().rstrip('\\n')
+    password = Path('/initial-admin/odoo-admin-password').read_text().rstrip('\\n')
+    env.ref('base.user_admin').write({'login': login, 'password': password})
+    env.cr.execute("UPDATE odoo_deployment_init SET state = 'complete' WHERE singleton = true")
+    env.cr.commit()
+    """, text=True, check=True)
+            print('Initial web administrator configured; starting Odoo.', flush=True)
+    finally:
+        connection.close()

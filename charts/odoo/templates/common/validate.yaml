@@ -5,10 +5,16 @@
 {{- fail "Enable only one of traefik.enabled and sharedIngress.enabled" }}
 {{- end }}
 {{- if not .Values.existingSecret }}
-{{- fail "existingSecret must name the Secret containing the three passwords" }}
+{{- fail "existingSecret must name the Secret containing database, master and initial web login credentials" }}
 {{- end }}
-{{- if and .Values.odoo.database (not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.database)) }}
+{{- if not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.database) }}
 {{- fail "odoo.database must use lowercase letters, digits and underscores" }}
+{{- end }}
+{{- if or .Values.odoo.listDb (not .Values.odoo.proxyMode) }}
+{{- fail "Keep odoo.listDb=false and odoo.proxyMode=true; database initialization is automatic" }}
+{{- end }}
+{{- if lt (int .Values.odoo.initializationWaitSeconds) 1 }}
+{{- fail "odoo.initializationWaitSeconds must be positive" }}
 {{- end }}
 {{- if not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.databaseUser) }}
 {{- fail "odoo.databaseUser must use lowercase letters, digits and underscores" }}
@@ -24,12 +30,6 @@
 {{- end }}
 {{- if not .Values.networkPolicy.dnsTo }}
 {{- fail "networkPolicy.dnsTo must identify the cluster DNS endpoints" }}
-{{- end }}
-{{- if and $exposed (or .Values.odoo.listDb (not .Values.odoo.database)) }}
-{{- fail "Complete database setup and disable listDb before enabling a proxy or ingress" }}
-{{- end }}
-{{- if and $exposed (not .Values.odoo.proxyMode) }}
-{{- fail "odoo.proxyMode must be true when a proxy or ingress is enabled" }}
 {{- end }}
 {{- if not (has .Values.traefik.service.type (list "ClusterIP" "LoadBalancer")) }}
 {{- fail "traefik.service.type must be ClusterIP or LoadBalancer" }}

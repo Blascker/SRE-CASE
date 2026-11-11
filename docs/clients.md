@@ -20,27 +20,24 @@ use cluster RBAC to restrict access and a CNI that enforces NetworkPolicy.
 
 Use Helm directly. The [README](../README.md#install-a-client-with-helm) is the
 installation runbook, with commands for client-a, client-b and client-c. Deployment
-also uses kubectl for local database setup access.
+also uses kubectl to inspect initialization and application status.
 
-Values merge in this order: `charts/odoo/values.yaml`, `clients/common.values.yaml`,
-`clients/<client>/values.yaml`, then explicit `-f` overrides. Bootstrap settings are
-applied last during initial installation. Shared settings belong in the common file;
-domains, Vault roles/paths and client-specific sizing or image versions belong in
-the client file. Never put passwords or private keys in these files.
+Values merge in this order: chart defaults, `clients/common.values.yaml`, the
+client's `values.yaml`, its optional `traefik.values.yaml`, then local overrides.
+Shared settings belong in the common file; database names, domains, Vault roles/paths
+and client-specific sizing or image versions belong in the client files. Never put
+passwords or private keys in them. Each client has two files; there is no temporary
+initialization override.
 
 ```sh
 helm lint --strict charts/odoo --namespace odoo-client-a \
   -f clients/common.values.yaml -f clients/client-a/values.yaml
 helm template odoo charts/odoo --namespace odoo-client-a \
   -f clients/common.values.yaml -f clients/client-a/values.yaml
-helm template odoo charts/odoo --namespace odoo-client-a \
-  -f clients/common.values.yaml -f clients/client-a/values.yaml \
-  -f examples/bootstrap.values.yaml
 ```
 
 Repeat with the other client names and namespaces. These commands do not access
-Kubernetes. Rendered output is for review; install through Helm with the correct
-namespace. Local rendering does not verify network enforcement or Vault policies.
+Kubernetes. Local rendering does not verify network enforcement or Vault policies.
 
 ## Shared ingress prerequisites
 
@@ -78,19 +75,26 @@ verified Vault CA trust. The controller and VSO must already be installed.
 2. Replace the example hostname in each client's values. Put environment-specific
    settings in an ignored `cluster.local.yaml`; use an additional client-specific
    override where needed. Explicit `-f` arguments must be repeated on every command.
-3. Run `helm install` in the client's namespace with common values, client values,
-   any local overrides and finally `examples/bootstrap.values.yaml`. Both proxy
-   modes remain disabled. Create the database through a local port-forward, using
-   the exact database name in the inventory. Verify login and attachments, then
-   revoke the application's `CREATEDB` permission through the database administrator.
-4. Run `helm upgrade --reset-values` with the same normal values and local overrides,
-   omitting the bootstrap file. Confirm TLS synchronization, HTTPS login, WebSockets
-   and attachment access. Repeat independently for the other clients.
+3. Run `helm install` with common values, client values, any optional dedicated-proxy
+   file and local overrides. PostgreSQL provisions an empty database and restricted
+   owner on a fresh volume. Odoo's `initialize-database` init container installs
+   `base` and `web` without demo data, then sets the first web administrator from
+   Vault keys `odoo-admin-login` and `odoo-admin-password`.
+4. Wait for readiness, then verify HTTPS login, WebSockets and attachments. Subsequent
+   changes use `helm upgrade --reset-values` with the same normal values files.
 
-Database initialization remains manual. Helm does not create Vault policies, issue
-certificates, install the shared controller or implement backups. Configuration
-rollback does not reverse database migrations. Retained PVCs do not protect against
-namespace deletion.
+The init container skips initialized databases and never resets existing users or
+runs module upgrades. A durable database marker records initial credential setup.
+Incomplete module initialization blocks startup and requires manual recovery;
+interrupted credential finalization can resume on the next attempt. PostgreSQL
+initialization SQL runs only on an empty volume, so existing database/role provisioning
+and legacy privilege revocation require an administrator. Supply the two initial
+web credential keys before upgrading existing installations, even when they will
+be skipped. Initial credential changes in Vault do not rotate an existing web login.
+
+Helm does not create Vault policies, issue certificates, install the shared controller
+or implement backups. Configuration rollback does not reverse database migrations.
+Retained PVCs do not protect against namespace deletion.
 
 If an installation already exists, keep its original release, namespace, database
 and PVC identity using direct Helm commands until an explicit migration is planned.
@@ -99,8 +103,9 @@ The new fleet names do not adopt or migrate an existing `challenge` release.
 ## Add the fourth or hundredth client
 
 Add `clients/<client-id>/values.yaml` with unique database/role names, hostname,
-Vault role and KV paths, following the three examples. Provision the corresponding
-Vault binding and secrets, run validation, then initialize/deploy that client.
+Vault role and KV paths, following the three existing clients. Copy its optional Traefik
+override too, updating comments and proxy hostname for the new client. Provision the corresponding
+Vault binding and secrets, run validation, then deploy that client; its init container handles database setup.
 Use the same chart with the new values path and namespace in the Helm commands.
 Adding a directory does not deploy it automatically. Validate hostname and Vault
 path uniqueness during review; Helm lint cannot prove the Vault policies or DNS

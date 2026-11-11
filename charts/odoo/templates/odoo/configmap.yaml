@@ -20,8 +20,8 @@ data:
     workers = {{ .Values.odoo.workers }}
     max_cron_threads = {{ .Values.odoo.maxCronThreads }}
     gevent_port = 8072
-    limit_memory_soft = {{ .Values.odoo.limitMemorySoft }}
-    limit_memory_hard = {{ .Values.odoo.limitMemoryHard }}
+    limit_memory_soft = {{ .Values.odoo.limitMemorySoft | int64 }}
+    limit_memory_hard = {{ .Values.odoo.limitMemoryHard | int64 }}
     limit_time_cpu = {{ .Values.odoo.limitTimeCpu }}
     limit_time_real = {{ .Values.odoo.limitTimeReal }}
     limit_request = 8192
