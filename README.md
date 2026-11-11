@@ -35,7 +35,8 @@ Browser --> Traefik --+--> Client B: Odoo --> PostgreSQL B + storage B
 
 Match `sharedIngress.controller.namespace` and `podLabels` to the actual controller.
 The common values assume namespace `traefik`; k3s-packaged Traefik normally runs in
-`kube-system`. PostgreSQL uses its configured/default StorageClass with an RWO volume.
+`kube-system`. Both client volumes use Longhorn: RWX for Odoo, a separate RWO volume
+for PostgreSQL.
 
 ## Install a client with Helm
 

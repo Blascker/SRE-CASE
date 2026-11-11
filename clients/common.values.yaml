@@ -24,6 +24,9 @@ odoo:
   storage:
     storageClass: longhorn
     accessMode: ReadWriteMany
+postgresql:
+  storage:
+    storageClass: longhorn
 traefik:
   enabled: false
 sharedIngress:

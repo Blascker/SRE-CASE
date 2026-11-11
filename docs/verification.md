@@ -34,7 +34,7 @@ kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get hpa odoo-odoo
 
 Expected: nodes Ready, metrics API available, numerical CPU values, pods Ready,
 VSO synchronized and claims Bound. `odoo-odoo-data` must be **RWX** on Longhorn;
-`odoo-db-data` must be **RWO**. HPA should show the configured limits and numerical
+`odoo-db-data` must be **RWO**, also on Longhorn. HPA should show the configured limits and numerical
 CPU utilization, not persistent `<unknown>`. Allow time for initial metrics collection.
 No volume migration is needed for these fresh installations.
 

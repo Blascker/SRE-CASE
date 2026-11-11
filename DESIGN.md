@@ -4,24 +4,50 @@
 
 The deployment uses one Helm chart and a separate release namespace per client.
 Odoo 20 runs behind a shared Traefik controller. Each client owns its PostgreSQL 16
-instance and two volumes: Longhorn RWX for Odoo, RWO for PostgreSQL.
+instance and two separate Longhorn volumes: RWX for Odoo, RWO for PostgreSQL.
 
-```mermaid
-flowchart TB
-    Browser["Browser: client hostname"] --> Proxy["Shared Traefik: HTTPS"]
-    Proxy --> Service["Client Odoo Service: 8069 / 8072"]
-    Service --> Pods["Odoo: 1 to 4 replicas"]
-    Pods --> RWX["Longhorn RWX: sessions and attachments"]
-    Pods --> DB["Dedicated PostgreSQL: 5432"]
-    DB --> RWO["Database RWO volume"]
-    Metrics["Metrics Server"] --> HPA["Client HPA"]
-    HPA --> Pods
+```text
+                             Browser
+                                |
+                              HTTPS
+                                v
+                       Shared Traefik ingress
+                                |
+      +-------------------------v--------------------------+
+      |              Client namespace (A / B / C)          |
+      |                                                    |
+      |            Odoo Service :8069 / :8072              |
+      |                         |                          |
+      |                         v                          |
+      |  HPA ----------> Odoo replicas (1-4)               |
+      |   ^                     |            |             |
+      |   |                     v            v             |
+      | CPU metrics       Shared RWX     PostgreSQL :5432  |
+      |                   PVC: 10 GiB        |             |
+      |                   sessions +         v             |
+      |                   attachments    RWO PVC: 20 GiB   |
+      |                         |            |             |
+      +-------------------------|------------|-------------+
+                                |            |
+                                v            v
+                       Longhorn persistent storage
+                    (separate volumes for every client)
 ```
 
 The chart can alternatively run a dedicated Traefik proxy per client. Exactly one
 proxy mode is enabled. Shared ingress is the default for the three client profiles.
 Odoo and PostgreSQL Services remain internal; Odoo connects to its database using
 `odoo-db.<client-namespace>.svc.cluster.local:5432`.
+
+| Consumer | PVC | Container location | Storage |
+| --- | --- | --- | --- |
+| Odoo replicas | `odoo-odoo-data` | `/var/lib/odoo` | Longhorn RWX, 10 GiB |
+| PostgreSQL | `odoo-db-data` | `/var/lib/postgresql/data/pgdata` | Longhorn RWO, 20 GiB |
+
+RWX lets Odoo replicas share files across nodes. PostgreSQL writes its database and
+WAL to its own RWO volume; it does not share Odoo's volume. Longhorn replicates volume
+blocks according to its configuration, but this does not add PostgreSQL standby
+instances or replace backups.
 
 ## Main decisions
 

@@ -53,7 +53,7 @@ Apply the normal Helm upgrade. HPA then manages replica counts automatically;
 `odoo.replicas` is used only when autoscaling is disabled.
 
 The client profiles use Longhorn RWX storage for sessions and attachments. PostgreSQL
-retains its separate RWO volume and configured/default StorageClass. Client connection
+uses a separate Longhorn RWO volume for its database files. Client connection
 pools are 4 per process, including a separate gevent pool of 4. The chart checks the
 maximum pool budget against PostgreSQL's 100 connections, reserving 20 for operations.
 Review pools, database resources and quotas together before raising the replica limit.
