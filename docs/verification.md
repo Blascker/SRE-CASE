@@ -1,125 +1,59 @@
-# Verify the deployment on k3s
+# Deployment verification
 
-Use this runbook after the [fresh Helm installation](../README.md#install-a-client-with-helm).
-No migration is needed for a fresh installation. These checks have not been run on
-the target k3s cluster; they describe how to verify its actual behavior.
+Run these checks after [installation](../README.md#install-a-client-with-helm), before
+onboarding users. Repeat for all three clients. Local checks confirmed initialization,
+login, attachments, WebSockets and shared data across two containers; k3s, Longhorn,
+HPA, Vault and shared ingress still need validation on the target cluster.
 
-The chart, local two-replica application checks and cluster checks cover different things:
+```mermaid
+flowchart LR
+    Platform["Cluster prerequisites"] --> Client["Client Ready"]
+    Client --> Scaling["Automatic scale-up/down"]
+    Scaling --> Shared["Shared data and sessions"]
+    Shared --> Public["HTTPS and WebSockets"]
+```
 
-| Check | Already verified locally | Still requires k3s |
-| --- | --- | --- |
-| Helm rendering, HPA configuration and storage/connection-budget validation | Yes, all three clients | Resource admission and reconciliation |
-| Concurrent initialization, sessions/attachments shared by two Odoo replicas, WebSocket access | Yes, with a local shared Docker volume | Longhorn mounts and access from actual nodes |
-| CPU-driven automatic scale-up and scale-down | No | Metrics Server, HPA controller and sufficient node capacity |
-| Public DNS/TLS, shared ingress and network-policy enforcement | No | Actual cluster networking and certificates |
+## Cluster and client status
 
-Run commands from the repository root. Set `TARGET_CONTEXT` to the intended kubeconfig
-context and `TARGET_NAMESPACE` to the client being verified. For example:
+Replace the context placeholder and select the client namespace:
 
 ```sh
 export TARGET_CONTEXT='your-k3s-context'
 export TARGET_NAMESPACE='odoo-client-a'
-```
 
-Replace the context placeholder before running. Repeat for `odoo-client-b` and
-`odoo-client-c`. All three use release `odoo`; names below follow that release name.
-The read-only inspection commands do not print Secret payloads. The bounded CPU load
-and scratch-file checks below actively exercise the selected client; run them before
-onboarding real users.
-
-## 1. Check cluster prerequisites
-
-```mermaid
-flowchart LR
-    Nodes["Ready nodes and available capacity"] --> Storage["Longhorn RWX and NFS support"]
-    Storage --> Metrics["Metrics API available and numerical usage"]
-    Metrics --> Ingress["Actual IngressClass and controller identity"]
-    Ingress --> Ready["Proceed to client checks"]
-```
-
-```sh
-kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" get nodes -o wide
+kubectl --context "$TARGET_CONTEXT" get nodes
 kubectl --context "$TARGET_CONTEXT" get storageclass longhorn
 kubectl --context "$TARGET_CONTEXT" get apiservice v1beta1.metrics.k8s.io
 kubectl --context "$TARGET_CONTEXT" top nodes
-kubectl --context "$TARGET_CONTEXT" get ingressclass traefik
-```
-
-Expected: eligible nodes are Ready, the `longhorn` StorageClass exists, the metrics
-API reports `AVAILABLE=True`, CPU/memory values are numerical, and the configured
-IngressClass exists. An RWX cross-node check needs at least two eligible nodes.
-Longhorn must have enough healthy replicas and capacity for its configured policy.
-NFSv4 client support and the required storage network access must be present on every
-node that may run Odoo. A StorageClass name alone does not prove RWX mounts work.
-
-k3s normally packages Metrics Server and Traefik, but either can be disabled or
-configured differently. If using packaged Traefik in `kube-system`, set
-`sharedIngress.controller.namespace: kube-system` in your local overrides. The common
-values currently assume a separately managed controller in namespace `traefik`.
-Always match its actual namespace and pod labels before installing clients.
-
-## 2. Check the client installation
-
-```mermaid
-flowchart TB
-    Helm["Helm release deployed"] --> Secrets["VSO synchronized"]
-    Secrets --> PVC["Odoo RWX and PostgreSQL RWO claims Bound"]
-    PVC --> Pods["Initialization completes and pods Ready"]
-    Pods --> HPA["HPA reports numerical CPU and correct limits"]
-```
-
-```sh
 helm status odoo --kube-context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE"
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get pods -o wide
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get pvc
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get vaultstaticsecret
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get hpa odoo-odoo
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" top pods -l app=odoo
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get pods -o wide
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get pvc
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get vaultstaticsecret
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get hpa odoo-odoo
 ```
 
-Expected: Helm reports deployed, Odoo and PostgreSQL become Ready, both PVCs are Bound,
-VSO reports successful synchronization, and HPA has numerical CPU utilization with
-minimum 1 and maximum 4 replicas unless the client overrides them. Allow initial
-metrics collection time; persistent `<unknown>` is not a passing result.
+Expected: nodes Ready, metrics API available, numerical CPU values, pods Ready,
+VSO synchronized and claims Bound. `odoo-odoo-data` must be **RWX** on Longhorn;
+`odoo-db-data` must be **RWO**. HPA should show the configured limits and numerical
+CPU utilization, not persistent `<unknown>`. Allow time for initial metrics collection.
+No volume migration is needed for these fresh installations.
 
-The application claim `odoo-odoo-data` must show `RWX` and StorageClass `longhorn`.
-The separate database claim `odoo-db-data` must show `RWO`; this is intentional.
-If using `odoo.storage.existingClaim`, inspect that application's claim instead.
-The application remains unavailable until its init container finishes successfully.
+## Automatic scaling
 
-## 3. Verify automatic scale-up and scale-down
-
-```mermaid
-flowchart TB
-    Baseline["Record initial replica count"] --> Load["Bounded CPU load for 5 minutes"]
-    Load --> Up["Observe automatic growth and Ready pods"]
-    Up --> Stop["Load ends"]
-    Stop --> Wait["Allow scale-down stabilization"]
-    Wait --> Down["Observe automatic reduction toward minimum"]
-```
-
-Keep HPA enabled; do not use `kubectl scale` for this check. In one terminal, watch:
+Watch the HPA and generate sustained CPU load in the verification environment:
 
 ```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  get hpa odoo-odoo --watch
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get hpa odoo-odoo --watch
 ```
 
-In another terminal, list Odoo pods and set `POD_A` to one Ready pod name:
+For a controlled check, choose a Ready Odoo pod from the list above and run this in
+another terminal with the same context/namespace variables. It creates CPU load for
+five minutes without modifying application data; it competes with Odoo for CPU.
 
 ```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  get pods -l app=odoo -o wide
 export POD_A='replace-with-a-ready-odoo-pod-name'
-```
-
-The following controlled load runs two CPU-bound processes inside that pod for five
-minutes, then exits. It does not change the database or application files. It competes
-with Odoo for the pod's CPU limit, so use it only during initial verification:
-
-```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  exec -i "${POD_A:?Set POD_A first}" -c odoo -- python3 - <<'PY'
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" \
+  exec -i "$POD_A" -c odoo -- python3 - <<'PY'
 from multiprocessing import Process
 import time
 
@@ -136,145 +70,65 @@ for worker in workers:
 PY
 ```
 
-Expected: numerical CPU utilization rises above the configured target, HPA requests
-more than one replica, and the new pods initialize and become Ready. The default
-policy permits only one added pod per minute, up to four. Reaching exactly four is
-not guaranteed by this load: observe actual utilization and HPA decisions. A CPU-bound
-request workload against Odoo can additionally validate representative user traffic.
+Pass: HPA automatically requests additional replicas and they become Ready. After
+load ends, it reduces the count toward its minimum. Allow the five-minute scale-down
+stabilization period and up to one removal per minute. The load need not reach exactly
+four replicas. Do not use `kubectl scale` to demonstrate automatic behavior.
 
-While extra replicas are running, perform the shared-storage/session checks below
-in other terminals. After the load ends, CPU should drop and HPA should eventually
-return toward its minimum. Scale-down stabilizes for five minutes and removes at
-most one pod per minute, so allow additional time for metrics and stabilization.
+## Shared storage and sessions
 
-Pass criteria: observed automatic growth above the initial replica count and later
-automatic reduction without manually changing replicas. HPA desired replicas alone
-are insufficient; the requested pods must actually become Ready.
+While two replicas are Ready, select `POD_A` and `POD_B` from `get pods -o wide`.
+Prefer different nodes; same-node checks do not establish cross-node RWX behavior.
+Every eligible node needs NFSv4 client support and working Longhorn connectivity.
 
-## 4. Verify shared storage and sessions
-
-```mermaid
-flowchart TB
-    Pods["Two Ready replicas; prefer different nodes"] --> Write["Replica A creates scratch file"]
-    Write --> Read["Replica B reads and removes that file"]
-    Pods --> Login["Log in through replica A"]
-    Login --> Session["Replica B recognizes the same browser session"]
-    Session --> Attachment["Upload through A and download through B"]
-    Read --> Result["Record cross-node status and results"]
-    Attachment --> Result
-```
-
-While at least two Odoo pods are Ready, choose distinct pod names:
+Create a scratch file exclusively on A, then read and remove it through B:
 
 ```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  get pods -l app=odoo -o wide
 export POD_A='replace-with-first-ready-odoo-pod-name'
 export POD_B='replace-with-second-ready-odoo-pod-name'
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" exec "$POD_A" -c odoo -- \
+  python3 -c 'from pathlib import Path; p=Path("/var/lib/odoo/.odoo-rwx-verification"); f=p.open("x"); f.write("rwx-ok"); f.close()'
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" exec "$POD_B" -c odoo -- \
+  python3 -c 'from pathlib import Path; p=Path("/var/lib/odoo/.odoo-rwx-verification"); assert p.read_text()=="rwx-ok"; p.unlink(); print("Shared storage verified")'
 ```
 
-Prefer pods on different nodes. The chart does not force replica placement. If they
-are on the same node, this verifies shared access but leaves cross-node RWX behavior
-unverified; repeat when two Ready replicas are scheduled on different nodes.
-
-Create the runbook's scratch file from the first pod. Exclusive
-creation prevents overwriting an existing file with that name:
+If the scratch file already exists, inspect the previous attempt before reusing it.
+For sessions, run these port-forwards in separate terminals:
 
 ```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  exec "${POD_A:?Set POD_A first}" -c odoo -- python3 -c \
-  'from pathlib import Path; p=Path("/var/lib/odoo/.odoo-rwx-verification"); f=p.open("x"); f.write("odoo-rwx-ok"); f.close()'
-```
-
-Read the same file through the second pod and remove it only after the content matches:
-
-```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  exec "${POD_B:?Set POD_B first}" -c odoo -- python3 -c \
-  'from pathlib import Path; p=Path("/var/lib/odoo/.odoo-rwx-verification"); assert p.read_text()=="odoo-rwx-ok"; p.unlink(); print("Shared read/write verified")'
-```
-
-Expected: both commands succeed without mount or permission errors. If exclusive
-creation reports an existing file, inspect the previous verification attempt before
-reusing the name; do not overwrite unknown data.
-
-For session behavior, open two local port-forwards in separate terminals with the
-same context/namespace variables and the selected pod names set:
-
-```sh
-# Terminal A
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  port-forward "pod/${POD_A:?Set POD_A first}" 18069:8069
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" port-forward "pod/$POD_A" 18069:8069
 ```
 
 ```sh
-# Terminal B
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  port-forward "pod/${POD_B:?Set POD_B first}" 28069:8069
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" port-forward "pod/$POD_B" 28069:8069
 ```
 
-Log in at `http://localhost:18069` and open `http://localhost:28069` in the same
-browser profile, consistently using `localhost` for both. Cookies are shared across
-these ports. Expected: the second replica recognizes the authenticated session.
-Use the deployed application's attachment UI to upload a small file through one
-replica and download it through the other; confirm the contents match. Stop both
-port-forwards after checking. Pod port-forwards isolate application behavior; they
-do not validate ingress routing or NetworkPolicy enforcement.
+Log in at `http://localhost:18069`, then open `http://localhost:28069` in the same
+browser profile. Pass: the second replica recognizes the session. Upload an attachment
+through the deployed application's UI on one replica and download it through the
+other. Stop the port-forwards afterward. These checks bypass ingress.
 
-## 5. Verify the actual hostname
+## Public access and troubleshooting
 
-```mermaid
-flowchart LR
-    HTTP["HTTP hostname"] --> HTTPS["HTTPS redirect and trusted certificate"]
-    HTTPS --> Login["Login and attachments through ingress"]
-    Login --> WS["WebSocket status 101"]
-    WS --> Scale["Repeat requests while HPA changes replicas"]
-```
+Through the real hostname, verify the trusted TLS certificate, HTTP-to-HTTPS redirect,
+login and attachment access. Browser developer tools should show a `/websocket`
+upgrade with status **101**. Confirm requests continue after HPA scales down;
+WebSocket connections may reconnect.
 
-Use the client's real configured hostname and certificate:
-
-- HTTP redirects to HTTPS, and HTTPS presents the matching trusted certificate.
-- Login and attachment upload/download work through ingress while multiple replicas run.
-- Browser developer tools show the `/websocket` request upgrading with status 101.
-- When HPA reduces replica count, subsequent browser requests and attachment access
-  continue through the remaining Ready endpoints. WebSocket connections may reconnect.
-
-Check HPA, pod status and application logs together. These checks demonstrate scaling;
-they do not establish database, storage or ingress high availability.
-
-## If a check fails
-
-```mermaid
-flowchart TB
-    Failure{"Observed failure"} -->|"Unknown CPU"| Metrics["Metrics API and CPU requests"]
-    Failure -->|"Pending pods"| Capacity["Capacity, quota and mount events"]
-    Failure -->|"Mount or file errors"| Storage["Longhorn, NFS and permissions"]
-    Failure -->|"Initialization blocked"| Init["VSO, PostgreSQL and init logs"]
-    Metrics --> Repeat["Fix cause and repeat the failed check"]
-    Capacity --> Repeat
-    Storage --> Repeat
-    Init --> Repeat
-```
-
-```sh
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" describe hpa odoo-odoo
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" describe pvc odoo-odoo-data
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" get events --sort-by=.metadata.creationTimestamp
-kubectl --context "$TARGET_CONTEXT" --namespace "$TARGET_NAMESPACE" \
-  logs deployment/odoo-odoo -c initialize-database
-```
-
-| Symptom | What to inspect |
+| Problem | Inspect |
 | --- | --- |
-| HPA CPU stays `<unknown>` | Metrics API availability, Metrics Server errors, pod readiness and CPU requests |
-| HPA requests replicas but pods remain Pending | Scheduling capacity, namespace quota, PVC binding and mount events |
-| RWX claim remains Pending | StorageClass, Longhorn volume/replica health and available storage |
-| Mount or permission errors on one node | NFS client support, storage connectivity, Longhorn share-manager and UID/GID 1000 permissions |
-| New pod remains in initialization | VSO synchronization, database reachability, init logs and initialization lock timeout |
-| Repeated logout or missing attachments across pods | All pods reference the same application claim/data directory, matching versions and file permissions |
-| No scale-down after load ends | Remaining CPU load, HPA stabilization/recommendations and any per-client minimum override |
+| HPA CPU is `<unknown>` | Metrics Server, readiness and CPU requests |
+| Replicas requested but Pending | Node capacity, quota and PVC/mount events |
+| RWX mount or permission errors | Longhorn health, NFS clients and UID/GID 1000 access |
+| Initialization blocked | VSO status, database connectivity and init logs |
+| Sessions/files differ between replicas | Same claim, data directory, image and permissions |
 
-Fix the underlying condition and repeat the failed check. Do not delete PVCs or
-print credential payloads to diagnose these issues. Record the context, client,
-date, observed replica changes, pod/node placement and results before marking the
-cluster verification complete.
+```sh
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" describe hpa odoo-odoo
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get events --sort-by=.metadata.creationTimestamp
+kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" logs deployment/odoo-odoo -c initialize-database
+```
+
+Record the client, observed replica changes, node placement and results. Do not delete
+PVCs or expose credentials while diagnosing a failure. Scaling verification is not
+proof of database/storage failover or full HA.
