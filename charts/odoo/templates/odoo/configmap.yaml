@@ -17,6 +17,7 @@ data:
     db_maxconn = {{ .Values.odoo.dbMaxconn }}
     list_db = {{ ternary "True" "False" .Values.odoo.listDb }}
     proxy_mode = {{ ternary "True" "False" .Values.odoo.proxyMode }}
+    http_interface = 0.0.0.0
     workers = {{ .Values.odoo.workers }}
     max_cron_threads = {{ .Values.odoo.maxCronThreads }}
     gevent_port = 8072

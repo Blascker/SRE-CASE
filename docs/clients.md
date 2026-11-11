@@ -1,6 +1,6 @@
 # Three clients, one reusable chart
 
-The repository defines three independent installations. Each owns an Odoo Deployment,
+The repository defines three independent Odoo 20 installations. Each owns an Odoo Deployment,
 a PostgreSQL StatefulSet, two retained PVCs, credentials, TLS Secret, NetworkPolicies
 and a ResourceQuota. PostgreSQL is never shared between clients. Only the existing
 ingress controller, Vault/VSO and cluster infrastructure are shared.
@@ -83,8 +83,9 @@ verified Vault CA trust. The controller and VSO must already be installed.
 4. Wait for readiness, then verify HTTPS login, WebSockets and attachments. Subsequent
    changes use `helm upgrade --reset-values` with the same normal values files.
 
-The init container skips initialized databases and never resets existing users or
-runs module upgrades. A durable database marker records initial credential setup.
+The init container skips initialized databases from the same Odoo major series and
+never resets existing users or runs module upgrades. It blocks mismatched versions;
+an Odoo 19 database must be migrated and validated before deployment with Odoo 20. A durable database marker records initial credential setup.
 Incomplete module initialization blocks startup and requires manual recovery;
 interrupted credential finalization can resume on the next attempt. PostgreSQL
 initialization SQL runs only on an empty volume, so existing database/role provisioning

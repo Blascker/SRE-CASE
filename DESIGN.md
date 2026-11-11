@@ -6,12 +6,17 @@ This chart deploys one customer installation into a dedicated namespace: one Odo
 
 The current milestone is a readable, locally renderable chart. Deployment, Vault authentication/synchronization, database initialization, storage permissions, restore behavior and application functionality remain unverified on the target cluster. This is not yet a claim of production readiness.
 
-Local verification with the configured Odoo 19 and PostgreSQL 16 images confirmed
-fresh initialization, initial web password hashing, disabled demo data, the restricted
-database role, restart behavior that preserves credentials, and refusal to reset an
-incomplete database. The temporary Docker volume needed group permissions matching
-the chart's fsGroup requirement. All three client configurations render in shared
-and dedicated proxy modes. This does not verify VSO, ingress or storage on Kubernetes.
+Local verification with Odoo 20.0-20261102 and PostgreSQL 16 confirmed fresh
+initialization, disabled demo data, restricted database-role privileges, authenticated
+web access, attachment upload/download and persistence after restart. HTTP/database
+health checks and WebSocket protocol upgrades passed both directly and through the
+rendered dedicated Traefik configuration, including HTTPS and HTTP-to-HTTPS redirect
+(using a temporary local certificate). Rerunning initialization preserved existing
+credentials even after the initial credential inputs changed. A real Odoo 19 database
+was rejected without modification by the major-version guard. Temporary Docker
+volumes were configured to match the chart's UID/GID and writable group permissions.
+All client configurations are checked locally; VSO, NetworkPolicy enforcement, shared
+ingress reconciliation and the target Kubernetes storage remain unverified.
 
 The three client configurations use shared ingress:
 
@@ -106,9 +111,11 @@ DNS names provide service discovery; NetworkPolicies enforce the permitted desti
 
 ## Application configuration
 
-The chart uses Odoo 19 and PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Defaults use two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
+The chart uses Odoo 20 and PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Odoo 20 defaults to a loopback HTTP listener, so the chart explicitly sets
+`http_interface = 0.0.0.0` for Kubernetes probes and proxy traffic on both 8069 and
+8072. Defaults use two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
 
-The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/19.0/entrypoint.sh) supports `PASSWORD_FILE` and waits for PostgreSQL. We keep that entrypoint. The prepare-config init container copies the public configuration and appends the master and database passwords from a Secret to a memory-backed volume. Initialization and the main container mount that private file read-only, so the official entrypoint reads the database password from configuration. The initialize-database init container uses chart-managed Python logic and Odoo CLI commands from the same image. Initial web credentials are mounted only in that init container; pod access remains privileged access.
+The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/20.0/entrypoint.sh) supports `PASSWORD_FILE` and waits for PostgreSQL. We keep that entrypoint. The prepare-config init container copies the public configuration and appends the master and database passwords from a Secret to a memory-backed volume. Initialization and the main container mount that private file read-only, so the official entrypoint reads the database password from configuration. The initialize-database init container uses chart-managed Python logic and Odoo CLI commands from the same image. Initial web credentials are mounted only in that init container; pod access remains privileged access.
 
 No custom addons are mounted yet. Future addons should be delivered in a versioned image derived from the official image, so code changes are reproducible.
 
@@ -135,8 +142,12 @@ users, passwords or modules. A completed marker causes future init runs to skip 
 initial setup. Initial web credentials must remain available as Secret keys for the
 pod volume, but later Vault changes do not rotate existing Odoo web passwords.
 
-The init container never performs module upgrades. Restoring or changing an Odoo
-version requires the explicit migration procedure. The initialization wait budget
+The init container never performs module upgrades. Before accepting an existing
+database, it compares the installed base module series with the running image. A
+major-version mismatch blocks startup without changing data. An existing Odoo 19
+database must be migrated and validated with compatible addons before using Odoo 20;
+a Helm image change cannot migrate the schema. Restoring or changing an Odoo version
+requires the explicit migration procedure. The initialization wait budget
 covers database connectivity; Helm's timeout must also allow module installation.
 
 Public TLS terminates at Traefik. Internal HTTP and PostgreSQL connections stay inside the cluster and are network-restricted, but are not encrypted in this baseline. Add internal TLS if required by the deployment's threat model. Kubernetes Secrets also require suitable RBAC and encryption at rest. External APIs, SMTP and internet access are denied by default.
@@ -157,7 +168,7 @@ Restore into a separate database and volume, start the matching Odoo image, then
 
 ## Observability and silent failures
 
-Logs go to container stdout/stderr for the cluster logging system. Dedicated Traefik emits JSON access logs without request headers; its ping probe checks proxy health, not end-to-end application behavior. Shared-controller logging and probes are configured outside the chart. Odoo liveness checks the HTTP process; readiness uses the [official health endpoint's database-server check](https://github.com/odoo/odoo/blob/19.0/addons/web/controllers/home.py). That check connects to the maintenance database and does **not** prove the customer database or business workflows are healthy.
+Logs go to container stdout/stderr for the cluster logging system. Dedicated Traefik emits JSON access logs without request headers; its ping probe checks proxy health, not end-to-end application behavior. Shared-controller logging and probes are configured outside the chart. Odoo liveness checks the HTTP process; readiness uses the [official health endpoint's database-server check](https://github.com/odoo/odoo/blob/20.0/addons/web/controllers/home.py). That check connects to the maintenance database and does **not** prove the customer database or business workflows are healthy.
 
 Next, integrate alerts for unavailable pods, repeated restarts, latency/errors, database connections, disk capacity and backup age. Add an authenticated synthetic workflow that reads a record and retrieves an attachment, plus freshness checks for scheduled jobs and outgoing mail. Alert delivery and restore drills need independent verification. These integrations are planned, not resources currently installed by the chart.
 

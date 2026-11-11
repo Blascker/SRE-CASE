@@ -67,7 +67,7 @@ resourceQuota:
     pods: "6"
 
 odoo:
-  image: odoo:19.0-20261102
+  image: odoo:20.0-20261102
   # One database per release; PostgreSQL creates it and the init container initializes it.
   database: odoo
   databaseUser: odoo

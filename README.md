@@ -2,7 +2,8 @@
 
 One reusable Helm chart, three independent clients. Each client has its own Odoo,
 PostgreSQL instance, namespace, two persistent volumes, Vault identity and resource
-quota. The client configurations use an existing shared Traefik ingress controller.
+quota. The default application image is `odoo:20.0-20261102`. The client
+configurations use an existing shared Traefik ingress controller.
 
 Nothing has been applied to a cluster. [DESIGN.md](DESIGN.md) describes the architecture
 and remaining production work; [docs/clients.md](docs/clients.md) explains configuration
@@ -130,7 +131,7 @@ data, and sets the initial administrator login/password from Vault keys
 `odoo-admin-login` and `odoo-admin-password`. The main Odoo container starts only
 after initialization completes. Database listing stays disabled throughout.
 
-An already initialized database is left unchanged. A database-local completion
+An already initialized database from the same Odoo major series is left unchanged. A database-local completion
 marker prevents initial passwords from being reapplied on restart. If initialization
 finishes but credential setup is interrupted, the next attempt finalizes credentials
 before Odoo can start. Partial module installation blocks startup for manual recovery;
@@ -165,6 +166,14 @@ helm upgrade odoo charts/odoo \
 Substitute the client namespace and values file for client-b or client-c. Repeat
 all environment-specific overrides. Database/module migrations require a separate
 backup and maintenance procedure; the init container does not perform them.
+
+For an existing **Odoo 19 database**, first back up the database and matching
+filestore, migrate them using an appropriate Odoo major-version upgrade process,
+and validate the migrated copy and all required addons with Odoo 20. The initializer
+checks the installed base module version and blocks an unmigrated Odoo 19 database;
+changing the image tag or running `helm upgrade` does not migrate it. See the
+[Odoo upgrade documentation](https://www.odoo.com/documentation/20.0/administration/upgrade.html).
+The install commands above are for new Odoo 20 installations.
 
 For existing PostgreSQL volumes, initialization SQL does not run again. Confirm the
 configured database and owner already exist, revoke any legacy `CREATEDB` privilege

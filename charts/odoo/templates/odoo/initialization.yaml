@@ -11,6 +11,7 @@ data:
     import time
 
     import psycopg2
+    from odoo import release
 
     configuration = configparser.RawConfigParser()
     configuration.read('/etc/odoo/odoo.conf')
@@ -43,9 +44,13 @@ data:
                 cursor.execute("SELECT to_regclass('public.ir_module_module')")
                 if cursor.fetchone()[0] is None:
                     return False
-                cursor.execute("SELECT name FROM ir_module_module WHERE name IN ('base', 'web') AND state = 'installed'")
-                if {row[0] for row in cursor.fetchall()} != {'base', 'web'}:
+                cursor.execute("SELECT name, latest_version FROM ir_module_module WHERE name IN ('base', 'web') AND state = 'installed'")
+                modules = dict(cursor.fetchall())
+                if modules.keys() != {'base', 'web'}:
                     return False
+                image_series = '.'.join(str(part) for part in release.version_info[:2])
+                if '.'.join((modules['base'] or '').split('.')[:2]) != image_series:
+                    raise SystemExit('Database and Odoo image major versions differ; migrate a verified backup before upgrading. No database changes were made.')
                 cursor.execute("SELECT count(*) FROM ir_module_module WHERE state IN ('to install', 'to upgrade', 'to remove')")
                 return cursor.fetchone()[0] == 0
 
