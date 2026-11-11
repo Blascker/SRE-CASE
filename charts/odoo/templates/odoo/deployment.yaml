@@ -3,8 +3,10 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}-odoo
 spec:
-  # Odoo sessions and filestore are local to this single persistent volume.
-  replicas: 1
+  # All replicas share this client's sessions and filestore through its data PVC.
+  {{- if not .Values.odoo.autoscaling.enabled }}
+  replicas: {{ .Values.odoo.replicas }}
+  {{- end }}
   strategy:
     type: Recreate
   selector:
@@ -184,7 +186,7 @@ spec:
                 path: db-password
         - name: data
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-odoo-data
+            claimName: {{ default (printf "%s-odoo-data" .Release.Name) .Values.odoo.storage.existingClaim }}
         - name: tmp
           emptyDir:
             sizeLimit: 512Mi

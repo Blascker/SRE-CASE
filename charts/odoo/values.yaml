@@ -68,6 +68,12 @@ resourceQuota:
 
 odoo:
   image: odoo:20.0-20261102
+  replicas: 1 # Used only when autoscaling is disabled.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
   # One database per release; PostgreSQL creates it and the init container initializes it.
   database: odoo
   databaseUser: odoo
@@ -77,6 +83,7 @@ odoo:
   workers: 2
   maxCronThreads: 1
   dbMaxconn: 8
+  dbMaxconnGevent: 8
   limitMemorySoft: 536870912  # 512 MiB per worker
   limitMemoryHard: 805306368 # 768 MiB per worker
   limitTimeCpu: 60
@@ -85,6 +92,8 @@ odoo:
   storage:
     size: 10Gi
     storageClass: "" # Empty uses the cluster's default StorageClass.
+    accessMode: ReadWriteOnce
+    existingClaim: "" # Use a pre-provisioned/migrated claim instead of creating one.
   resources:
     requests:
       cpu: 500m
@@ -104,6 +113,7 @@ postgresql:
   workMem: 4MB
   maintenanceWorkMem: 64MB
   maxConnections: 100
+  connectionReserve: 20 # Reserved budget for administration and other connections.
   resources:
     requests:
       cpu: 250m

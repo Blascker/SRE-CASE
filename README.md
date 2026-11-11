@@ -2,12 +2,21 @@
 
 One reusable Helm chart, three independent clients. Each client has its own Odoo,
 PostgreSQL instance, namespace, two persistent volumes, Vault identity and resource
-quota. The default application image is `odoo:20.0-20261102`. The client
+quota. Each client automatically scales its Odoo application from one to four
+replicas using CPU metrics. The default application image is `odoo:20.0-20261102`. The client
 configurations use an existing shared Traefik ingress controller.
 
 Nothing has been applied to a cluster. [DESIGN.md](DESIGN.md) describes the architecture
 and remaining production work; [docs/clients.md](docs/clients.md) explains configuration
 and growth toward 100 clients.
+
+**This project is starting with fresh installations. No volume or database migration
+is needed.** Helm creates a new Longhorn RWX application volume and a separate RWO
+PostgreSQL volume for each client. Migration guidance below applies only if you later
+bring existing volumes or an older Odoo database into this deployment.
+
+After installation, follow [the k3s verification runbook](docs/verification.md) to
+check Metrics Server, automatic scale-up/down and shared storage on your cluster.
 
 ## Client inventory
 
@@ -27,7 +36,7 @@ charts/odoo/
   Chart.yaml
   values.yaml                    # Common chart defaults
   templates/
-    odoo/                        # Application, database init container/config, Service, PVC, policy
+    odoo/                        # Application, init container/config, HPA, Service, PVC, policy
     postgresql/                  # Dedicated database, initialization, PVC, network policy
     traefik/                     # Optional dedicated proxy and TLS secret sync
     ingress/                     # Routes through an existing shared controller
@@ -36,7 +45,7 @@ charts/odoo/
       validate.yaml              # Helm configuration checks; no Kubernetes resource
       resourcequota.yaml         # Optional namespace consumption limits
 clients/
-  common.values.yaml             # Shared Vault connection, ingress and quotas
+  common.values.yaml             # Vault, ingress, autoscaling, Longhorn RWX and quotas
   client-a/
     values.yaml                  # Database, hostname and Vault identity
     traefik.values.yaml          # Optional dedicated proxy for this client
@@ -45,13 +54,19 @@ clients/
 docs/
   vault.md                       # Vault prerequisites, client bindings and rotation
   clients.md                     # Configuration, ingress prerequisites and scaling
+  verification.md                # k3s checks, expected results and troubleshooting
 ```
 
 ## Prerequisites
 
 - Helm and kubectl, with an explicitly selected Kubernetes context.
-- A StorageClass supporting the configured volume permissions, and a CNI enforcing
-  NetworkPolicy. Check `clusterDomain` and `networkPolicy.dnsTo` against the cluster.
+- Longhorn installed with StorageClass `longhorn` supporting ReadWriteMany (RWX).
+  Install the required NFSv4 client packages on every eligible k3s node and verify
+  shared volume permissions. PostgreSQL keeps its configured/default RWO storage.
+- A working Metrics Server (`metrics.k8s.io` API); k3s usually includes one, but
+  verify `kubectl top pods` works before relying on autoscaling. See the
+  [k3s packaged components](https://docs.k3s.io/installation/packaged-components).
+- A CNI enforcing NetworkPolicy. Check `clusterDomain` and `networkPolicy.dnsTo` against the cluster.
 - VSO and its `secrets.hashicorp.com/v1beta1` CRDs, watching all client namespaces
   and authorized to synchronize Secrets and restart the client Odoo Deployments.
 - Existing Vault Kubernetes-auth roles bound to `odoo-vault-auth` in each client's
@@ -167,6 +182,11 @@ Substitute the client namespace and values file for client-b or client-c. Repeat
 all environment-specific overrides. Database/module migrations require a separate
 backup and maintenance procedure; the init container does not perform them.
 
+### Only when importing an existing installation
+
+Skip this section for the three fresh client installations. Their databases and
+volumes are created automatically by Helm and the init containers.
+
 For an existing **Odoo 19 database**, first back up the database and matching
 filestore, migrate them using an appropriate Odoo major-version upgrade process,
 and validate the migrated copy and all required addons with Odoo 20. The initializer
@@ -182,6 +202,62 @@ Vault before upgrading. Existing initialized databases keep their current logins
 An existing incomplete database needs manual recovery. Different release, namespace,
 database or PVC names require an explicit migration; this does not adopt a previous
 `challenge` release.
+
+## Automatic scaling per client
+
+The common client values enable an `autoscaling/v2` HorizontalPodAutoscaler (HPA)
+for each client's Odoo Deployment. It keeps at least one replica and scales up to
+four when average CPU utilization exceeds 70% of the CPU request. With the default
+500m request, the target is approximately 350m per pod. Scale-up is limited to one
+additional pod per minute; scale-down has a five-minute stabilization window and
+removes at most one pod per minute. Actual decisions depend on metrics and readiness.
+
+Change a specific client's limits by adding `autoscaling` under its existing
+`odoo` block in `clients/<client>/values.yaml`, retaining its database settings:
+
+```yaml
+odoo:
+  database: client_a
+  databaseUser: client_a
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+```
+
+Apply the normal Helm upgrade command above. Scaling is automatic after deployment;
+do not use `kubectl scale` to manage replica counts while HPA is enabled. The
+Deployment omits `spec.replicas` so Helm upgrades do not reset the HPA's current count.
+`odoo.replicas` is only used when `odoo.autoscaling.enabled: false`.
+
+```sh
+kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a get hpa odoo-odoo
+kubectl --context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a top pods -l app=odoo
+```
+
+All replicas mount the same client-specific Longhorn RWX volume at `/var/lib/odoo`,
+sharing sessions and attachments. New replicas wait for the database initialization
+lock and then skip completed initialization. Standard Odoo cron workers coordinate
+jobs through PostgreSQL row locks; custom jobs must handle retries and external side
+effects appropriately. The chart checks the maximum replica/worker connection budget
+against PostgreSQL's connection limit, and client quotas allow the default four replicas.
+CPU autoscaling does not detect every database or storage bottleneck; measure latency,
+connections, CPU and Longhorn I/O before increasing capacity limits.
+
+For a fresh installation, Helm creates the RWX application claim directly; leave
+`odoo.storage.existingClaim` empty. Only an installation that already has an RWO
+application PVC needs the [existing-volume migration procedure](docs/clients.md#only-for-existing-rwo-application-volumes).
+
+Run the [post-installation checks](docs/verification.md) to confirm numerical CPU
+metrics, actual automatic scale-up/down, RWX access and cross-replica sessions.
+Those checks distinguish configuration that renders successfully from behavior
+verified on k3s. No migration is part of the fresh-install verification.
+
+This change provides automatic application scaling. PostgreSQL remains one instance,
+updates still use `Recreate`, and storage/ingress failures can interrupt all replicas.
+It does not establish end-to-end high availability.
 
 ## Internal services and secrets
 
@@ -229,8 +305,8 @@ and point DNS to its Service. The three clients use shared ingress by default.
   not change existing SQL passwords; coordinate database and Vault rotation.
 - Both PVCs are retained on Helm uninstall, but not protected from namespace deletion.
   Retention is not a backup. Database and filestore must be recovered together.
-- Odoo uses `Recreate`; application updates interrupt service. Both Odoo and PostgreSQL
-  are single replicas. Helm rollback cannot reverse database/module migrations.
+- Odoo scales automatically but still uses `Recreate`; application rollouts interrupt
+  service. PostgreSQL remains a single replica. Helm rollback cannot reverse database/module migrations.
 - SMTP and external integrations are blocked by default and need deliberate egress rules.
 - With `vault.enabled: false`, supply Secrets separately and restart Odoo after credential
   changes. For dedicated Traefik, use `traefik.tlsRevision` to trigger a certificate reload.

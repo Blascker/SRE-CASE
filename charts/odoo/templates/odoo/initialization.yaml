@@ -34,9 +34,13 @@ data:
     try:
         with connection.cursor() as cursor:
             # Serialize initializers for this database; released when the session closes.
-            cursor.execute('SELECT pg_try_advisory_lock(192023, 1)')
-            if not cursor.fetchone()[0]:
-                raise SystemExit('Another database initializer is running; retry after it finishes.')
+            while True:
+                cursor.execute('SELECT pg_try_advisory_lock(192023, 1)')
+                if cursor.fetchone()[0]:
+                    break
+                if time.monotonic() >= deadline:
+                    raise SystemExit('Timed out waiting for another database initializer; retry after it finishes.')
+                time.sleep(2)
             cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             tables = {row[0] for row in cursor.fetchall()}
 

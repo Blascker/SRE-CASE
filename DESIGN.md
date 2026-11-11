@@ -2,9 +2,16 @@
 
 ## Scope and current state
 
-This chart deploys one customer installation into a dedicated namespace: one Odoo pod, one dedicated PostgreSQL pod, separate persistent volumes, either an optional dedicated Traefik proxy or routes through a shared ingress controller, and VSO resources that synchronize secrets from the existing Vault in `vault-namespace`. Three client configurations reuse the chart; PostgreSQL is never shared between clients.
+This chart deploys one customer installation into a dedicated namespace: an autoscaled Odoo Deployment, one dedicated PostgreSQL pod, separate persistent volumes, either an optional dedicated Traefik proxy or routes through a shared ingress controller, and VSO resources that synchronize secrets from the existing Vault in `vault-namespace`. Three client configurations reuse the chart; PostgreSQL is never shared between clients.
 
 The current milestone is a readable, locally renderable chart. Deployment, Vault authentication/synchronization, database initialization, storage permissions, restore behavior and application functionality remain unverified on the target cluster. This is not yet a claim of production readiness.
+
+The deployment path is a fresh installation: there are no existing application PVCs
+or customer databases to migrate. New application claims use Longhorn RWX, while
+PostgreSQL claims remain RWO. Existing-volume/version migration notes describe a
+future import or upgrade scenario, not a prerequisite for the first installation.
+The [verification runbook](docs/verification.md) defines the target-cluster checks
+and their pass criteria; documenting them does not mean they have been executed.
 
 Local verification with Odoo 20.0-20261102 and PostgreSQL 16 confirmed fresh
 initialization, disabled demo data, restricted database-role privileges, authenticated
@@ -18,19 +25,25 @@ volumes were configured to match the chart's UID/GID and writable group permissi
 All client configurations are checked locally; VSO, NetworkPolicy enforcement, shared
 ingress reconciliation and the target Kubernetes storage remain unverified.
 
+The scaling change was additionally verified with two Odoo replicas and concurrent
+initializers sharing a local data volume: cross-replica sessions, attachments and
+WebSocket access passed. All three clients render valid HPA/storage configurations
+in both proxy modes, and unsafe replica/storage/connection-budget combinations are
+rejected. Metrics-based scaling and Longhorn RWX remain target-cluster checks.
+
 The three client configurations use shared ingress:
 
 ```text
 Browser -- HTTPS --> Existing shared Traefik controller
                          |
                          +-- client-a hostname --> odoo-client-a namespace
-                         |                          Odoo + filestore PVC
+                         |                          Odoo (1–4 replicas) + shared RWX PVC
                          |                            --> PostgreSQL + database PVC
                          +-- client-b hostname --> odoo-client-b namespace
-                         |                          Odoo + filestore PVC
+                         |                          Odoo (1–4 replicas) + shared RWX PVC
                          |                            --> PostgreSQL + database PVC
                          +-- client-c hostname --> odoo-client-c namespace
-                                                    Odoo + filestore PVC
+                                                    Odoo (1–4 replicas) + shared RWX PVC
                                                       --> PostgreSQL + database PVC
 ```
 
@@ -48,7 +61,7 @@ Browser -- HTTPS --> Traefik Service (the only external endpoint)
                     internal Odoo Service FQDN
                     :8069 HTTP / :8072 WebSockets
                             |
-                     Odoo Deployment (1) ---- Odoo data PVC
+                     Odoo Deployment (1–4) ---- shared Odoo RWX PVC
                             |
                    internal PostgreSQL Service FQDN :5432
                             |
@@ -113,7 +126,7 @@ DNS names provide service discovery; NetworkPolicies enforce the permitted desti
 
 The chart uses Odoo 20 and PostgreSQL 16. Odoo configuration stays visible in `templates/odoo/configmap.yaml`; it includes the database filter, worker limits, proxy mode and logging. Odoo 20 defaults to a loopback HTTP listener, so the chart explicitly sets
 `http_interface = 0.0.0.0` for Kubernetes probes and proxy traffic on both 8069 and
-8072. Defaults use two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
+8072. Each pod defaults to two HTTP workers and one cron worker with a 4 GiB pod limit. Memory limits in Odoo apply per worker, so they must be budgeted against the whole pod. PostgreSQL settings are starting estimates, not benchmark results.
 
 The [official Odoo entrypoint](https://github.com/odoo/docker/blob/master/20.0/entrypoint.sh) supports `PASSWORD_FILE` and waits for PostgreSQL. We keep that entrypoint. The prepare-config init container copies the public configuration and appends the master and database passwords from a Secret to a memory-backed volume. Initialization and the main container mount that private file read-only, so the official entrypoint reads the database password from configuration. The initialize-database init container uses chart-managed Python logic and Odoo CLI commands from the same image. Initial web credentials are mounted only in that init container; pod access remains privileged access.
 
@@ -154,7 +167,44 @@ Public TLS terminates at Traefik. Internal HTTP and PostgreSQL connections stay 
 
 ## Persistence, availability and upgrades
 
-The Odoo volume holds filestore and sessions. PostgreSQL has its own volume and a `PGDATA` subdirectory. A single replica and `Recreate` avoid overlapping application pods using the same volume during upgrades. They imply downtime; neither workload is highly available.
+Each client's Odoo Deployment has a CPU-based autoscaling/v2 HPA enabled by the
+common client values, with minReplicas=1, maxReplicas=4 and a 70% CPU utilization
+target. HPA owns the replica count; the Deployment omits spec.replicas when enabled.
+The standalone chart defaults to autoscaling disabled and one fixed replica.
+Scale-up adds at most one pod per minute; scale-down stabilizes for 300 seconds and
+removes at most one pod per minute. Metrics Server and sufficient k3s capacity are
+required; CPU metrics do not detect every database/storage bottleneck.
+
+The client values use StorageClass longhorn and ReadWriteMany for the shared Odoo
+data volume. It holds both filestore and sessions, allowing requests to move between
+replicas. The same application image and database are used by every replica. Concurrent
+initializers wait for the existing PostgreSQL advisory lock, then check completion.
+A bounded wait prevents an initializer from waiting indefinitely. Odoo cron row locks
+coordinate standard jobs across processes; custom side effects still need idempotency.
+
+The chart rejects multi-replica configurations with RWO storage, and checks a
+conservative connection-pool budget at the maximum HPA size:
+maxReplicas × ((workers + maxCronThreads + 1) × dbMaxconn + dbMaxconnGevent)
++ postgresql.connectionReserve <= postgresql.maxConnections.
+The extra pool accounts for the master process. Client pool sizes are 4, resulting
+in a budget of 80 application connections plus 20 reserved at four replicas. These
+are capacity bounds, not measured concurrency. Namespace quotas accommodate four
+application replicas, PostgreSQL and the optional proxy; larger configurations need
+resource, database and quota review together.
+
+Existing RWO PVCs cannot be patched into RWX volumes. Copy the complete Odoo data
+into a new RWX claim during maintenance and select it via odoo.storage.existingClaim;
+the chart then references that claim instead of creating an application PVC. It does
+not migrate files or delete the old retained claim. PostgreSQL retains its own RWO
+volume and PGDATA subdirectory, with its original storage settings.
+
+That migration is conditional on an existing RWO application claim. It is not
+performed or required for the three new client installations.
+
+Recreate remains the deployment strategy, so application rollouts still interrupt
+service even with autoscaling. Scaling a replica count does not itself trigger a
+pod-template rollout. PostgreSQL and the optional dedicated proxy remain single
+instances. There is no new failover, topology guarantee or end-to-end HA claim.
 
 PVC retention protects against Helm uninstall, not namespace deletion, storage loss or operator mistakes. PostgreSQL belongs to each client's release. At fleet scale, an operator can provide a separately managed database lifecycle with replication and tested failover while retaining a dedicated PostgreSQL cluster for every client.
 
@@ -174,7 +224,8 @@ Next, integrate alerts for unavailable pods, repeated restarts, latency/errors, 
 
 ## Three clients with a path to 100
 
-`clients/common.values.yaml` enables shared ingress and a ResourceQuota. The client-a,
+`clients/common.values.yaml` enables shared ingress, CPU autoscaling, Longhorn RWX
+storage and a ResourceQuota. The client-a,
 client-b and client-c directories supply separate databases, roles, hostnames and Vault
 paths. Direct Helm commands install release `odoo` in namespace `odoo-<client>`,
 applying common values before client values, an optional client traefik.values.yaml
@@ -203,7 +254,9 @@ planning must include worker memory and database connections per customer. GitOp
 automated fleet onboarding, database migrations, backup jobs and monitoring remain future
 work; adding directories does not provision those systems.
 
-Adding replicas is a separate design change: shared filestore, session behavior, cron execution, storage performance and failover must be tested together. CPU autoscaling alone does not establish an Odoo HA architecture.
+Automatic Odoo replica scaling is implemented with shared RWX data. Longhorn NFS
+behavior under load, HPA reactions and node-failure recovery still require validation
+on k3s. CPU autoscaling does not establish an Odoo HA architecture.
 
 ## Next milestones
 

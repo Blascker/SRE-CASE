@@ -15,6 +15,7 @@ data:
     dbfilter = ^{{ .Values.odoo.database }}$
     {{- end }}
     db_maxconn = {{ .Values.odoo.dbMaxconn }}
+    db_maxconn_gevent = {{ .Values.odoo.dbMaxconnGevent }}
     list_db = {{ ternary "True" "False" .Values.odoo.listDb }}
     proxy_mode = {{ ternary "True" "False" .Values.odoo.proxyMode }}
     http_interface = 0.0.0.0

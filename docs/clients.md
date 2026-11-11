@@ -1,9 +1,15 @@
 # Three clients, one reusable chart
 
 The repository defines three independent Odoo 20 installations. Each owns an Odoo Deployment,
-a PostgreSQL StatefulSet, two retained PVCs, credentials, TLS Secret, NetworkPolicies
-and a ResourceQuota. PostgreSQL is never shared between clients. Only the existing
+a PostgreSQL StatefulSet, two retained PVCs, credentials, TLS Secret, NetworkPolicies,
+a per-client HPA and a ResourceQuota. Its Odoo replicas share one Longhorn RWX
+volume for sessions and attachments. PostgreSQL is never shared between clients. Only the existing
 ingress controller, Vault/VSO and cluster infrastructure are shared.
+
+The current project has no deployed clients or existing data. First installation
+creates new RWX application volumes and new RWO database volumes; no migration is
+required. Follow the [README installation commands](../README.md#install-a-client-with-helm),
+then [verify the deployment on k3s](verification.md).
 
 | Client | Helm release | Kubernetes namespace | Database / role | Vault role | KV path | Example hostname |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -101,6 +107,66 @@ If an installation already exists, keep its original release, namespace, databas
 and PVC identity using direct Helm commands until an explicit migration is planned.
 The new fleet names do not adopt or migrate an existing `challenge` release.
 
+## Automatic Odoo scaling
+
+Each client inherits an enabled CPU HPA from clients/common.values.yaml. The default
+range is one to four Odoo pods, targeting 70% average CPU utilization. A working k3s
+Metrics Server is required. Tune minReplicas, maxReplicas and the CPU target in that
+client's existing odoo.autoscaling block, then apply its normal Helm upgrade; HPA
+handles subsequent scaling. See [the README commands](../README.md#automatic-scaling-per-client).
+
+Shared sessions and attachments require the client's Longhorn RWX volume. Install
+NFSv4 client support on eligible nodes and verify the longhorn StorageClass and volume
+permissions. Fresh installations create the RWX claim automatically. Only an already
+deployed RWO application claim requires the migration described below. PostgreSQL keeps its
+existing dedicated single-instance storage; this work adds no database replication.
+
+Client defaults use dbMaxconn=4 and dbMaxconnGevent=4. The chart validates their
+conservative maximum process-pool budget against PostgreSQL maxConnections, including
+20 connections reserved for operations. Four replicas fit the default budget of 100;
+raising the maximum requires reviewing pools, database resources and namespace quotas.
+At four replicas, requests per client are 2.25 CPU and 4.25 GiB RAM, with the same
+30 GiB of logical PVC capacity. Optional proxy, Longhorn replication and platform
+resources are additional. Quotas bound consumption rather than reserve it.
+
+Longhorn share-manager/storage failures, the single PostgreSQL instance and Recreate
+rollouts can interrupt service across replicas. This is automatic application scaling,
+not end-to-end HA. Validate actual CPU-driven scale-up/down and cross-node RWX behavior
+on the target k3s cluster before treating the configuration as production-ready.
+
+Local container verification confirmed concurrent initialization, a login session
+created on one replica being accepted on the other, attachment upload on one and
+download on the other, and a WebSocket upgrade using the shared session. This used
+a shared local volume and does not verify Longhorn NFS behavior or the Kubernetes HPA.
+See [Longhorn RWX requirements](https://longhorn.io/docs/latest/nodes-and-volumes/volumes/rwx-volumes/)
+and [Kubernetes autoscaling](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/).
+
+For exact commands, expected results and troubleshooting, use the
+[k3s verification runbook](verification.md). Verify all three clients independently;
+the HPA in one namespace does not scale another client's Odoo.
+
+## Only for existing RWO application volumes
+
+This is not needed for the project's fresh installations. Use it only when bringing
+an existing application PVC with data into the new RWX configuration.
+
+1. Schedule maintenance and stop incoming traffic and every Odoo writer, including
+   cron workers. Suspend autoscaling through the release configuration while stopping
+   the application; an enabled HPA would otherwise restore its minimum replicas.
+2. Take a coordinated database/filestore backup. Provision a new Longhorn RWX PVC
+   in the same namespace. Do not attempt to patch an RWO claim's access mode in place.
+3. Copy the complete `/var/lib/odoo` data directory, including filestore and sessions,
+   preserving UID/GID and permissions. Keep the original claim until recovery is verified.
+4. Set `odoo.storage.existingClaim` to the new claim and keep
+   `odoo.storage.accessMode: ReadWriteMany`. Restore the release's autoscaling settings
+   and upgrade with the same client values and local overrides.
+5. Verify login, attachments and cross-replica access before reopening traffic.
+
+Stopping an existing release for a data copy requires a separate maintenance procedure;
+the chart deliberately requires a positive fixed replica count and does not provide a
+scale-to-zero maintenance mode. Disabling HPA alone does not stop Odoo. The chart
+references the supplied claim but never copies data or removes the old retained PVC.
+
 ## Add the fourth or hundredth client
 
 Add `clients/<client-id>/values.yaml` with unique database/role names, hostname,
@@ -118,7 +184,7 @@ between batches. Pin images by digest and promote reviewed Git revisions. For 10
 clients, a GitOps controller can consume this same directory layout; Argo CD is not
 installed or configured by this milestone.
 
-Current application/database requests total 0.75 CPU, 1.25 GiB RAM and 30 GiB of
+At the default HPA minimum of one Odoo replica, application/database requests total 0.75 CPU, 1.25 GiB RAM and 30 GiB of
 storage per client: three clients request 2.25 CPU, 3.75 GiB RAM and 90 GiB storage;
 100 request 75 CPU, 125 GiB RAM and 3,000 GiB storage. These exclude shared services,
 backup capacity, storage replication and operating headroom, and are not load-test
@@ -128,8 +194,8 @@ client sizing. See [Kubernetes quotas](https://kubernetes.io/docs/concepts/polic
 
 Before production or growth toward 100: implement coordinated database/filestore
 backups and restore drills, per-client monitoring, upgrade/migration automation and
-capacity measurements. Both Odoo and PostgreSQL remain single replicas with downtime
-during some failures/upgrades. A future PostgreSQL operator may add replication and
+capacity measurements. Odoo automatically scales from one to four replicas; PostgreSQL remains a single
+instance and Recreate application rollouts still cause downtime. A future PostgreSQL operator may add replication and
 backup automation while preserving a dedicated PostgreSQL cluster for every client.
 Distribute clients across bounded Kubernetes clusters as workload and recovery needs
 require; client count alone does not determine the number of clusters.

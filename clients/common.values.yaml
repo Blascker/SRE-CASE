@@ -13,6 +13,17 @@ vault:
     audiences: [vault]
   kvMount: ODOO
 # Each client's values.yaml supplies its own Vault role and KV paths.
+odoo:
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  dbMaxconn: 4
+  dbMaxconnGevent: 4
+  storage:
+    storageClass: longhorn
+    accessMode: ReadWriteMany
 traefik:
   enabled: false
 sharedIngress:
@@ -24,3 +35,10 @@ sharedIngress:
       app.kubernetes.io/name: traefik
 resourceQuota:
   enabled: true
+  # Room for up to four Odoo replicas and a dedicated PostgreSQL instance.
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "10"
+    limits.memory: 20Gi
+    pods: "8"
