@@ -55,7 +55,8 @@ flowchart TB
     end
     Prom -.->|4. Scrapes metrics| Sources
 
-    Longhorn["LONGHORN"] --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
+    Clients --> Longhorn["LONGHORN"]
+    Longhorn --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
 
 
     classDef backup fill:#fbe8ec,stroke:#ad6678,color:#492732
