@@ -15,6 +15,11 @@ flowchart LR
 
 ## Cluster and client status
 
+For dashboards, install [Prometheus](prometheus.md) and
+[Grafana](grafana.md).
+Confirm scrape targets are UP, then inspect node readiness, client pod resources,
+restarts and PVC usage. The commands below remain useful for direct diagnosis.
+
 Replace the context placeholder and select the client namespace:
 
 ```sh

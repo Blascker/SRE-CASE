@@ -1,0 +1,112 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  serviceName: grafana-internal
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      containers:
+      - name: grafana
+        image: grafana/grafana:13.2.2
+        args: []
+        ports:
+        - name: http
+          containerPort: 3000
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: "/var/lib/grafana"
+        - name: provisioning
+          mountPath: "/etc/grafana/provisioning/datasources"
+          readOnly: true
+        - name: providers
+          mountPath: "/etc/grafana/provisioning/dashboards"
+          readOnly: true
+        - name: dashboards
+          mountPath: "/etc/grafana/dashboards"
+          readOnly: true
+        env:
+        - name: GF_SECURITY_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-user
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: admin-password
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: 'false'
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: 'false'
+        readinessProbe:
+          httpGet:
+            path: "/api/health"
+            port: http
+          periodSeconds: 10
+        startupProbe:
+          httpGet:
+            path: "/api/health"
+            port: http
+          periodSeconds: 10
+          failureThreshold: 60
+        livenessProbe:
+          httpGet:
+            path: "/api/health"
+            port: http
+          periodSeconds: 20
+      volumes:
+      - name: provisioning
+        configMap:
+          name: grafana-datasource
+      - name: providers
+        configMap:
+          name: grafana-providers
+      - name: dashboards
+        configMap:
+          name: grafana-dashboard
+      terminationGracePeriodSeconds: 60
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: longhorn
+      resources:
+        requests:
+          storage: 5Gi

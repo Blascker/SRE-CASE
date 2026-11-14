@@ -6,33 +6,39 @@ The deployment uses one Helm chart and a separate release namespace per client.
 Odoo 20 runs behind a shared Traefik controller. Each client owns its PostgreSQL 16
 instance and two separate Longhorn volumes: RWX for Odoo, RWO for PostgreSQL.
 
-```text
-                             Browser
-                                |
-                              HTTPS
-                                v
-                       Shared Traefik ingress
-                                |
-      +-------------------------v--------------------------+
-      |              Client namespace (A / B / C)          |
-      |                                                    |
-      |            Odoo Service :8069 / :8072              |
-      |                         |                          |
-      |                         v                          |
-      |  HPA ----------> Odoo replicas (1-4)               |
-      |   ^                     |            |             |
-      |   |                     v            v             |
-      | CPU metrics       Shared RWX     PostgreSQL :5432  |
-      |                   PVC: 10 GiB        |             |
-      |                   sessions +         v             |
-      |                   attachments    RWO PVC: 20 GiB   |
-      |                         |            |             |
-      +-------------------------|------------|-------------+
-                                |            |
-                                v            v
-                       Longhorn persistent storage
-                    (separate volumes for every client)
+```mermaid
+flowchart TB
+    Users["Users"] -->|HTTPS| Ingress["Shared Traefik ingress"]
+
+    subgraph K3s["k3s cluster"]
+        Ingress
+        subgraph Clients["Isolated client namespaces"]
+            A["Client A<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+            B["Client B<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+            C["Client C<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+        end
+        subgraph Services["Shared services"]
+            Vault["Vault"] --> VSO["Vault Secrets Operator"]
+            Grafana["Grafana dashboards"] -->|Queries| Prometheus["Prometheus"]
+            Prometheus -->|Alerts| Alertmanager["Alertmanager"]
+        end
+        Scaling["Metrics Server + per-client HPA"]
+        Metrics["Node, pod, PVC and Longhorn metrics"]
+        Longhorn["Longhorn persistent storage"]
+    end
+
+    Ingress --> A
+    Ingress --> B
+    Ingress --> C
+    VSO -->|Client-specific Kubernetes Secrets| Clients
+    Scaling -->|Automatically scales Odoo| Clients
+    Clients -->|Separate Odoo RWX and PostgreSQL RWO volumes| Longhorn
+    Prometheus -->|Scrapes| Metrics
 ```
+
+Each client has its own database and volumes. Vault, Prometheus, Grafana and
+Alertmanager also use separate Longhorn RWO volumes. VSO is installed separately;
+Metrics Server supplies CPU measurements for autoscaling.
 
 The chart can alternatively run a dedicated Traefik proxy per client. Exactly one
 proxy mode is enabled. Shared ingress is the default for the three client profiles.
@@ -59,6 +65,7 @@ instances or replace backups.
 | Longhorn RWX application volume | All Odoo replicas need the same sessions and attachments |
 | CPU-based HPA | Automatically adjust application capacity to load |
 | Vault with VSO | Keep secret values out of Git and Helm values |
+| Shared Prometheus and Grafana | View cluster and client health in one place |
 | Init container | Initialize the database before Odoo accepts requests |
 
 ## Initialization and security
@@ -136,6 +143,23 @@ Logs go to container stdout/stderr. Probes check process health and database-ser
 reachability, not business workflows; operational checks must also cover attachments,
 scheduled jobs and backup freshness.
 
+## Monitoring
+
+One [Prometheus installation](docs/prometheus.md) and
+[Grafana instance](docs/grafana.md) in namespace
+`monitoring` observes all clients and infrastructure. Prometheus collects node,
+kubelet, Kubernetes object and Longhorn metrics; Grafana provides dashboards for
+resources, nodes and persistent volumes. Alertmanager groups the supplied alerts;
+external notification receivers require configuration.
+
+Prometheus, Grafana and Alertmanager run as plain Kubernetes StatefulSets, each
+with a separate Longhorn RWO volume. ConfigMaps provision scraping, alert rules,
+the Grafana data source and a namespace-filtered overview dashboard. A Deployment
+collects Kubernetes object state; a DaemonSet exports metrics from each node.
+This initial setup uses one replica per component and internal Services with local
+port-forward access. It does not replace Metrics Server for HPA or collect logs.
+Application-specific database and Vault health metrics are separate future additions.
+
 ## Validation and next steps
 
 | Validation | Status |
@@ -144,9 +168,10 @@ scheduled jobs and backup freshness.
 | Fresh initialization, login, attachments, HTTPS and WebSockets | Verified in local containers |
 | Concurrent initialization and sessions/attachments across two replicas | Verified with a local shared volume |
 | HPA reactions, Longhorn RWX, VSO and shared ingress on k3s | Requires cluster verification |
+| Standalone monitoring manifests, configuration and dashboard | Local configuration checks; metric collection requires cluster verification |
 
 Use [the verification guide](docs/verification.md) for cluster checks. Before production,
-add coordinated database/filestore backups, restore drills, monitoring and alerts.
+add coordinated database/filestore backups, restore drills and external alert delivery.
 Backups should capture both data stores as one recovery set and be stored outside the
 cluster. Restore into separate resources and verify records and attachments.
 

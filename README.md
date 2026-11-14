@@ -4,17 +4,48 @@ A Helm deployment for three clients on k3s. Each client has its own namespace,
 Odoo application, PostgreSQL instance, storage and Vault credentials.
 Odoo 20 scales automatically from **1 to 4 replicas** using CPU metrics.
 
-```text
-                     +--> Client A: Odoo --> PostgreSQL A + storage A
-Browser --> Traefik --+--> Client B: Odoo --> PostgreSQL B + storage B
-                     +--> Client C: Odoo --> PostgreSQL C + storage C
+```mermaid
+flowchart TB
+    Users["Users"] -->|HTTPS| Ingress["Shared Traefik ingress"]
+
+    subgraph K3s["k3s cluster"]
+        Ingress
+        subgraph Clients["Isolated client namespaces"]
+            A["Client A<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+            B["Client B<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+            C["Client C<br/>Odoo: 1–4 replicas<br/>Dedicated PostgreSQL + PVCs"]
+        end
+        subgraph Services["Shared services"]
+            Vault["Vault"] --> VSO["Vault Secrets Operator"]
+            Grafana["Grafana dashboards"] -->|Queries| Prometheus["Prometheus"]
+            Prometheus -->|Alerts| Alertmanager["Alertmanager"]
+        end
+        Scaling["Metrics Server + per-client HPA"]
+        Metrics["Node, pod, PVC and Longhorn metrics"]
+        Longhorn["Longhorn persistent storage"]
+    end
+
+    Ingress --> A
+    Ingress --> B
+    Ingress --> C
+    VSO -->|Client-specific Kubernetes Secrets| Clients
+    Scaling -->|Automatically scales Odoo| Clients
+    Clients -->|Separate Odoo RWX and PostgreSQL RWO volumes| Longhorn
+    Prometheus -->|Scrapes| Metrics
 ```
+
+Each client has its own database and volumes. Vault, Prometheus, Grafana and
+Alertmanager also use separate Longhorn RWO volumes. VSO is installed separately;
+Metrics Server supplies CPU measurements for autoscaling.
 
 ## Project structure
 
 | Location | Purpose |
 | --- | --- |
 | `charts/odoo/` | Reusable Odoo/PostgreSQL chart |
+| [services/vault/](services/vault/) | Shared TLS-enabled Vault StatefulSet and Services |
+| [services/prometheus/](docs/prometheus.md) | Metrics collection, storage and alerts |
+| [services/grafana/](docs/grafana.md) | Kubernetes overview dashboard |
 | `clients/common.values.yaml` | Shared ingress, autoscaling, Longhorn and quota settings |
 | `clients/client-{a,b,c}/values.yaml` | Client database, hostname and Vault identity |
 | `clients/client-{a,b,c}/traefik.values.yaml` | Optional dedicated proxy |
@@ -37,6 +68,11 @@ Match `sharedIngress.controller.namespace` and `podLabels` to the actual control
 The common values assume namespace `traefik`; k3s-packaged Traefik normally runs in
 `kube-system`. Both client volumes use Longhorn: RWX for Odoo, a separate RWO volume
 for PostgreSQL.
+
+Install [Prometheus](docs/prometheus.md) and
+[Grafana](docs/grafana.md) to view nodes,
+pods, workload health, PVC usage and alerts across all clients. Its guide includes
+plain-manifest installation, Grafana login and verification of metric collection.
 
 ## Install a client with Helm
 
@@ -104,4 +140,5 @@ come from `odoo-admin-login` and `odoo-admin-password` in the client's Vault ent
 The application and two-replica shared-data behavior have been verified locally.
 Actual HPA behavior, Longhorn RWX, Vault synchronization and ingress still require
 verification on k3s. This case demonstrates **application scaling**, not full HA:
-PostgreSQL remains a single instance and backups/monitoring are future work.
+PostgreSQL remains a single instance. Backup automation and external alert
+notifications remain future work; monitoring manifests are provided under `services/prometheus/` and `services/grafana/`.

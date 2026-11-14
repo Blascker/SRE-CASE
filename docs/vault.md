@@ -1,7 +1,8 @@
 # Vault setup
 
-Vault and Vault Secrets Operator (VSO) are existing infrastructure. The chart creates
-client authentication and synchronization resources, not Vault policies or certificates.
+Deploy the shared Vault servers using [services/vault](../services/vault/).
+Vault Secrets Operator (VSO) is installed separately. The Odoo chart creates client
+authentication and synchronization resources, not Vault policies or certificates.
 
 ```mermaid
 flowchart LR
