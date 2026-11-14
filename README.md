@@ -5,10 +5,11 @@ Odoo application, PostgreSQL instance, storage and Vault credentials.
 Odoo 20 scales automatically from **1 to 4 replicas** using CPU metrics.
 
 ```mermaid
+%%{init: {"flowchart": {"htmlLabels": false, "padding": 24, "nodeSpacing": 40, "rankSpacing": 70, "subGraphTitleMargin": {"top": 16, "bottom": 28}}}}%%
 flowchart TB
     Users["Client users"] -->|1. HTTPS request| Traefik["Traefik<br/>Routes by client hostname"]
 
-    subgraph Clients["Client workloads — one isolated namespace per client"]
+    subgraph Clients["Client namespaces"]
         direction LR
         subgraph A["odoo-client-a"]
             OdooA["Odoo A<br/>1–4 replicas"] -->|SQL| DbA[("PostgreSQL A")]
@@ -25,47 +26,47 @@ flowchart TB
     Traefik -->|client-b hostname| OdooB
     Traefik -->|client-c hostname| OdooC
 
-    subgraph Secrets["Shared secrets service"]
-        Vault["Vault<br/>Stores each client's credentials and certificates"]
-        VSO["Vault Secrets Operator<br/>Copies only the allowed client secrets"]
+    subgraph Secrets["Secrets"]
+        Vault["Vault<br/>Client credentials<br/>and certificates"]
+        VSO["Vault Secrets Operator<br/>Synchronizes client secrets"]
         Vault -.->|2. Synchronize| VSO
     end
-    VSO -.->|Separate Kubernetes Secrets in each namespace| Clients
+    VSO -.->|Client-specific Secrets| Clients
 
-    subgraph Autoscaling["Automatic scaling"]
+    subgraph Autoscaling["Autoscaling"]
         MS["Metrics Server<br/>Measures pod CPU"]
-        HPA["One HPA per client<br/>Chooses the Odoo replica count"]
+        HPA["HPA per client<br/>Sets Odoo replica count"]
         MS -.->|3. CPU usage| HPA
     end
     HPA -.->|Adjusts Odoo replicas only| Clients
 
-    subgraph Monitoring["Shared monitoring services"]
-        Sources["Kubernetes and Longhorn collectors<br/>Node, pod and volume metrics"]
-        Prom["Prometheus<br/>Collects metrics and evaluates alerts"]
-        Grafana["Grafana<br/>Displays dashboards"]
-        Alerts["Alertmanager<br/>Groups active alerts"]
-        Sources -.->|4. Metrics| Prom
-        Prom -.->|Query results| Grafana
-        Prom -.->|Firing alerts| Alerts
+    subgraph Infrastructure["Kubernetes infrastructure"]
+        Sources["Metric endpoints<br/>API server, kubelets and exporters<br/>Nodes, client pods, PVCs and Longhorn"]
     end
 
-    Clients -->|5. Each client owns two separate volumes| Storage
-    Storage["Longhorn storage<br/>Odoo: 10 GiB RWX for shared sessions and attachments<br/>PostgreSQL: 20 GiB RWO for database files"]
+    subgraph Monitoring["Monitoring"]
+        Prom["Prometheus<br/>Metrics and alert rules"]
+        Grafana["Grafana<br/>Displays dashboards"]
+        Alerts["Alertmanager<br/>Groups active alerts"]
+        Grafana -.->|Queries metrics| Prom
+        Prom -.->|Firing alerts| Alerts
+    end
+    Prom -.->|4. Scrapes metrics| Sources
+
 
     classDef app fill:#e8f1ff,stroke:#3973ac,color:#152c44
     classDef db fill:#eee8fa,stroke:#8060a8,color:#302145
     classDef secrets fill:#fff1d6,stroke:#b8882c,color:#493510
     classDef metrics fill:#e5f4ec,stroke:#46896a,color:#183b2b
-    classDef storage fill:#fbe8ec,stroke:#ad6678,color:#492732
     class Traefik,OdooA,OdooB,OdooC app
     class DbA,DbB,DbC db
     class Vault,VSO secrets
     class MS,HPA,Sources,Prom,Grafana,Alerts metrics
-    class Storage storage
 ```
 
-Solid arrows show application traffic and storage access. Dashed arrows show
-secret synchronization, scaling decisions and monitoring data. Everything except
+Solid arrows show application traffic. Dashed arrows show
+secret synchronization, scaling decisions and monitoring interactions. Their labels
+identify the action and direction. Everything except
 client users runs inside k3s; the boxes separate responsibilities, not cluster nodes.
 
 | Flow | How to read it |
@@ -73,11 +74,10 @@ client users runs inside k3s; the boxes separate responsibilities, not cluster n
 | 1. Client traffic | Traefik selects the client's Odoo by hostname. Odoo connects only to that client's PostgreSQL. |
 | 2. Secrets | VSO reads the client's permitted Vault path and creates Secrets in that client's namespace. |
 | 3. Scaling | Metrics Server supplies CPU usage. Each HPA adjusts its Odoo replicas between 1 and 4; PostgreSQL stays at one replica. |
-| 4. Monitoring | Prometheus collects cluster/storage metrics. Grafana displays them; Alertmanager groups alerts. External notifications need configuration. |
-| 5. Storage | Each client has an Odoo volume shared by its replicas and a separate PostgreSQL volume. All use Longhorn. |
+| 4. Monitoring | Prometheus scrapes Kubernetes and Longhorn metric endpoints across the cluster, including client workloads. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
 
-Vault, Prometheus, Grafana and Alertmanager also have their own Longhorn RWO volumes,
-omitted from the diagram for clarity. VSO is installed separately. Monitoring pod
+Each client uses separate Longhorn volumes for Odoo and PostgreSQL. Vault,
+Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes. VSO is installed separately. Monitoring pod
 resources does not yet expose Vault seal status or PostgreSQL internal health.
 
 ## Project structure
