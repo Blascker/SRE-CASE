@@ -31,12 +31,16 @@ The data source uses the internal Service `http://prometheus:9090`.
 - Node readiness, unreachable scrape targets and pod readiness/phases.
 - CPU/memory by pod and container restarts.
 - PVC binding and filesystem usage, desired HPA replicas and raw Longhorn health.
+- Deployment available replicas, PV phases and Kubernetes Service metadata.
 
-Node, scrape-target and Longhorn panels remain cluster-wide. More node metrics
+Node, scrape-target, PV and Longhorn panels remain cluster-wide. More node metrics
 are available through Grafana Explore. Missing data is **unknown**, not zero;
 PVC usage depends on kubelet/CSI support. Vault seal status and PostgreSQL internals
 need separate application exporters. See [collection checks](prometheus.md#check-collection-and-alerts)
 if panels show no data.
+
+Service metadata is an inventory of Kubernetes Services, not a test of whether
+the applications behind them respond successfully.
 
 ## Maintenance
 

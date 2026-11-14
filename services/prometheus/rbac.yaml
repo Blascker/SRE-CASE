@@ -60,6 +60,7 @@ rules:
   - nodes
   - pods
   - namespaces
+  - services
   - persistentvolumes
   - persistentvolumeclaims
   verbs:

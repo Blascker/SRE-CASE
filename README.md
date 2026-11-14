@@ -41,7 +41,7 @@ flowchart TB
     HPA -.->|Adjusts Odoo replicas only| Clients
 
     subgraph Infrastructure["Kubernetes infrastructure"]
-        Sources["Metric endpoints<br/>API server, kubelets and exporters<br/>Nodes, client pods, PVCs and Longhorn"]
+        Sources["Metric endpoints<br/>API server, kubelets and exporters<br/>Nodes, pods and Deployments<br/>CPU, memory, PVs, PVCs and Services<br/>Longhorn storage health"]
     end
 
     subgraph Monitoring["Monitoring"]
@@ -66,19 +66,19 @@ flowchart TB
 
 Solid arrows show application traffic. Dashed arrows show
 secret synchronization, scaling decisions and monitoring interactions. Their labels
-identify the action and direction. Everything except
-client users runs inside k3s; the boxes separate responsibilities, not cluster nodes.
+identify the action and direction. Everything except client users runs inside k3s; the boxes separate responsibilities, not cluster nodes.
 
 | Flow | How to read it |
 | --- | --- |
 | 1. Client traffic | Traefik selects the client's Odoo by hostname. Odoo connects only to that client's PostgreSQL. |
 | 2. Secrets | VSO reads the client's permitted Vault path and creates Secrets in that client's namespace. |
 | 3. Scaling | Metrics Server supplies CPU usage. Each HPA adjusts its Odoo replicas between 1 and 4; PostgreSQL stays at one replica. |
-| 4. Monitoring | Prometheus scrapes Kubernetes and Longhorn metric endpoints across the cluster, including client workloads. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
+| 4. Monitoring | Prometheus scrapes cluster-wide resource usage, workload state, PV/PVC and Service metadata, and Longhorn health. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
 
 Each client uses separate Longhorn volumes for Odoo and PostgreSQL. Vault,
-Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes. VSO is installed separately. Monitoring pod
-resources does not yet expose Vault seal status or PostgreSQL internal health.
+Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes.
+VSO is installed separately. Monitoring pod resources does not yet expose Vault
+seal status or PostgreSQL internal health.
 
 ## Project structure
 
@@ -113,7 +113,7 @@ for PostgreSQL.
 
 Install [Prometheus](docs/prometheus.md) and
 [Grafana](docs/grafana.md) to view nodes,
-pods, workload health, PVC usage and alerts across all clients. Its guide includes
+pods, workload health, PVC usage and alerts across all clients. The guides include
 plain-manifest installation, Grafana login and verification of metric collection.
 
 ## Install a client with Helm

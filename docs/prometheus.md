@@ -34,7 +34,7 @@ resources, including cluster RBAC.
 | --- | --- | --- |
 | Prometheus | StatefulSet, 20 GiB RWO | Collects and stores metrics for up to 15 days or 16 GB |
 | Alertmanager | StatefulSet, 2 GiB RWO | Groups alerts; external delivery is not configured |
-| kube-state-metrics | Deployment | Pod phases, readiness, restarts, PVC state, replicas and HPA state |
+| kube-state-metrics | Deployment | Node/pod state, Deployment replicas, PV/PVC state, Service metadata and HPA state |
 | node-exporter | DaemonSet | Node CPU, memory, filesystem and network metrics |
 
 Prometheus discovers kubelets and scrapes them through the Kubernetes API proxy with
@@ -42,6 +42,11 @@ TLS verification. This includes cAdvisor container metrics and kubelet volume us
 Its ServiceAccount needs `nodes/proxy` access: treat this identity as privileged and
 restrict who can modify or execute commands in monitoring pods. kube-state-metrics
 has read-only access to the specific workload resource types it collects.
+
+CPU and memory usage come from kubelet/cAdvisor and node-exporter. Object state
+comes from kube-state-metrics, including [Service metadata](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/service/service-metrics.md).
+Service metadata describes Kubernetes configuration; it does not verify application
+responses or network connectivity.
 
 ## Check collection and alerts
 
