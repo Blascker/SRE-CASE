@@ -1,17 +1,13 @@
 # Prometheus and cluster metrics
 
-The manifests in `services/prometheus/` run Prometheus and Alertmanager as StatefulSets, with metric collectors
-for the whole cluster. Each StatefulSet has its own Longhorn volume. Install this once,
+The manifests in `services/prometheus/` run Prometheus and Alertmanager as
+StatefulSets, with metric collectors for the whole cluster. Each StatefulSet has its own Longhorn volume. Install this once,
 then install [Grafana](grafana.md) for dashboards. Both use namespace `monitoring`.
 
 ```text
-Kubernetes state + kubelet + node-exporter + Longhorn
-                          |
-                          v
-                      Prometheus --> Grafana
-                          |
-                          v
-                     Alertmanager
+Grafana --queries--> Prometheus --scrapes--> Kubernetes and Longhorn metrics
+                         |
+                         +--sends alerts--> Alertmanager
 ```
 
 ## Install
@@ -60,7 +56,8 @@ kubelet, cAdvisor, node-exporter and Longhorn targets should be **UP**. Dynamic 
 should have targets for all eligible nodes/managers. Verify the dashboard contains
 actual client pods and Bound PVCs after deployment.
 
-Prometheus rules cover unavailable nodes, pending/failed pods, repeated container
+Prometheus rules cover unavailable nodes, running but unready pods, pending/failed
+pods, repeated container
 restarts, unbound/nearly-full PVCs and failed scrapes. They appear on its Alerts page.
 Alertmanager is available through:
 
@@ -94,7 +91,7 @@ port-forwards avoid public exposure.
 Each StatefulSet has one replica, so monitoring is interrupted during replacement.
 PVCs are retained when StatefulSets are removed; namespace deletion can delete them.
 Increase resources/retention storage as ingestion grows. Prometheus and Alertmanager
-request about 2.2 GiB memory, plus collectors on each node.
+request about 2.1 GiB memory, plus collectors on each node.
 Longhorn replication requires extra physical disk capacity.
 
 After editing ConfigMaps, apply the directory and restart the affected StatefulSet
@@ -105,5 +102,4 @@ Metrics Server is still required for CPU HPA. k3s scheduler/controller-manager, 
 and kube-proxy metrics are not scraped because their endpoints are not exposed by
 default. Verify all collection on the actual cluster before relying on the dashboards.
 
-References: [Prometheus Kubernetes discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config),
-[Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/).
+Reference: [Prometheus Kubernetes discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config).

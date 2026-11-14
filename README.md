@@ -56,7 +56,6 @@ flowchart TB
     Clients --> Longhorn["LONGHORN"]
     Longhorn --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
 
-
     classDef backup fill:#fbe8ec,stroke:#ad6678,color:#492732
     class Longhorn,Backup,Destination backup
     classDef app fill:#e8f1ff,stroke:#3973ac,color:#152c44
@@ -71,8 +70,8 @@ flowchart TB
 
 Solid arrows show application traffic and the backup path. Dashed arrows show
 secret synchronization, scaling decisions and monitoring interactions. Their labels
-identify the action and direction. Client users and Hetzner Object Storage are outside k3s; the other boxes separate
-cluster responsibilities, not nodes.
+identify the action and direction. Client users and Hetzner Object Storage are
+outside k3s; the other boxes separate cluster responsibilities, not nodes.
 
 | Flow | How to read it |
 | --- | --- |
@@ -93,8 +92,8 @@ seal status or PostgreSQL internal health.
 | --- | --- |
 | `charts/odoo/` | Reusable Odoo/PostgreSQL chart |
 | [services/vault/](services/vault/) | Shared TLS-enabled Vault StatefulSet and Services |
-| [services/prometheus/](docs/prometheus.md) | Metrics collection, storage and alerts |
-| [services/grafana/](docs/grafana.md) | Kubernetes overview dashboard |
+| [services/prometheus/](services/prometheus/) | Metrics collection, storage and alerts ([guide](docs/prometheus.md)) |
+| [services/grafana/](services/grafana/) | Kubernetes overview dashboard ([guide](docs/grafana.md)) |
 | `clients/common.values.yaml` | Shared ingress, autoscaling, Longhorn and quota settings |
 | `clients/client-{a,b,c}/values.yaml` | Client database, hostname and Vault identity |
 | `clients/client-{a,b,c}/traefik.values.yaml` | Optional dedicated proxy |
@@ -111,22 +110,23 @@ seal status or PostgreSQL internal health.
 - Traefik with IngressClass `traefik`, HTTPS and HTTP-to-HTTPS redirection.
 - Vault and Vault Secrets Operator (VSO), configured as described in [Vault setup](docs/vault.md).
 - Real client hostnames, DNS records and matching TLS certificates in Vault.
-- NetworkPolicy enforcement, working cluster DNS and storage permissions for UID/GID 1000.
+- NetworkPolicy enforcement, working cluster DNS and storage permissions for Odoo
+  UID/GID 1000 and PostgreSQL UID/GID 999.
 
 Match `sharedIngress.controller.namespace` and `podLabels` to the actual controller.
 The common values assume namespace `traefik`; k3s-packaged Traefik normally runs in
 `kube-system`. Both client volumes use Longhorn: RWX for Odoo, a separate RWO volume
 for PostgreSQL.
 
-Install [Prometheus](docs/prometheus.md) and
-[Grafana](docs/grafana.md) to view nodes,
-pods, workload health, PVC usage and alerts across all clients. The guides include
+Install [Prometheus](docs/prometheus.md) and [Grafana](docs/grafana.md) to view
+nodes, pods, workload health, PVC usage and alerts across all clients. The guides include
 plain-manifest installation, Grafana login and verification of metric collection.
 
 ## Install a client with Helm
 
 Run from the repository root. Set the context and replace example hostnames before
-installation. Populate each client's Vault entry first. These are fresh installations;
+installation. Complete [Vault/VSO setup](docs/vault.md), including each client's KV
+entry and private-CA trust Secret if needed, first. These are fresh installations;
 Helm creates the volumes and the init container initializes Odoo automatically.
 
 ```sh

@@ -72,7 +72,9 @@ Verify actual scaling and storage behavior using [the cluster checks](verificati
 Copy an existing client directory, change the database/user, hostname and Vault
 role/paths, and update the optional proxy hostname. Provision its Vault binding,
 secrets, DNS and certificate. Run Helm lint/render, then install into a new namespace
-with that client's values. Adding a directory alone does not deploy it.
+with that client's values. Add both new volumes to the manually configured Longhorn
+backup policy; see [backups and recovery](../DESIGN.md#backups-and-recovery).
+Adding a directory alone does not deploy or enable backups for the client.
 
 ## Existing data and upgrades
 

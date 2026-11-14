@@ -1,11 +1,12 @@
 # Grafana dashboards
 
 Grafana runs as a StatefulSet with a 5 GiB Longhorn RWO volume. Its ConfigMaps
-provision the Prometheus data source and a Kubernetes overview dashboard.
+[provision](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+the Prometheus data source and a Kubernetes overview dashboard.
 Install [Prometheus](prometheus.md) first; both use namespace `monitoring`.
 
 ```text
-Prometheus --> Grafana --> Kubernetes overview
+Browser --> Grafana --queries--> Prometheus
 ```
 
 ## Install and open

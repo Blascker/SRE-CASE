@@ -58,7 +58,6 @@ flowchart TB
     Clients --> Longhorn["LONGHORN"]
     Longhorn --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
 
-
     classDef backup fill:#fbe8ec,stroke:#ad6678,color:#492732
     class Longhorn,Backup,Destination backup
     classDef app fill:#e8f1ff,stroke:#3973ac,color:#152c44
@@ -73,8 +72,8 @@ flowchart TB
 
 Solid arrows show application traffic and the backup path. Dashed arrows show
 secret synchronization, scaling decisions and monitoring interactions. Their labels
-identify the action and direction. Client users and Hetzner Object Storage are outside k3s; the other boxes separate
-cluster responsibilities, not nodes.
+identify the action and direction. Client users and Hetzner Object Storage are
+outside k3s; the other boxes separate cluster responsibilities, not nodes.
 
 | Flow | How to read it |
 | --- | --- |
@@ -140,8 +139,8 @@ PostgreSQL advisory lock. Administrator setup and its completion marker commit
 together, so restarts preserve existing users and passwords. Demo data is disabled.
 
 The application database role has no superuser, role-management or database-creation
-privileges. Database listing stays disabled. Workloads run as non-root with restricted
-capabilities and no service-account token. The main Odoo container does not mount the
+privileges. Database listing stays disabled. Client workloads run as non-root with
+restricted capabilities and no mounted service-account token. The main Odoo container does not mount the
 initial web-login credentials or the PostgreSQL administrator password.
 
 NetworkPolicies allow the configured proxy to reach Odoo, and Odoo to reach only its
@@ -180,7 +179,7 @@ data would require copying to a new RWX claim selected through `odoo.storage.exi
 Both chart-managed PVCs are retained on Helm uninstall, but namespace deletion or
 storage loss can still remove data. Retention and Longhorn replication are not backups.
 
-This implementation prioritizes scaling over full HA. PostgreSQL and the optional
+This implementation prioritizes application scaling over full HA. PostgreSQL and the optional
 dedicated proxy remain single instances. `Recreate` application rollouts interrupt
 service; no node-placement or database-failover guarantee is configured.
 
@@ -214,8 +213,9 @@ Application-specific database and Vault health metrics are separate future addit
 ## Backups and recovery
 
 Longhorn already provides storage. Its backup target and recurring jobs will be
-configured manually to use a private Hetzner Cloud Object Storage bucket. No backup
-manifests, schedules or credentials are managed by this repository.
+configured manually to use a private Hetzner Cloud Object Storage bucket. The
+backup path in the architecture diagram describes this planned setup; no backup
+manifests, schedules, volume-selection labels or credentials are managed here.
 
 ```mermaid
 flowchart LR
@@ -230,6 +230,9 @@ backup count and selected volumes in Longhorn. Hetzner endpoints include
 `hel1.your-objectstorage.com`; use the endpoint matching the bucket's location.
 See [Hetzner's S3 setup](https://docs.hetzner.com/storage/object-storage/getting-started/using-s3-api-tools/)
 and [Longhorn backup targets](https://longhorn.io/docs/1.13.0/snapshots-and-backups/backup-and-restore/set-backup-target/).
+Assign jobs to both client volumes in the Longhorn UI. If selecting jobs through
+PVC labels instead, enable `recurring-job.longhorn.io/source` and select an existing
+job/group; labels alone do not create a schedule.
 
 | Data | Recovery requirement |
 | --- | --- |
@@ -241,8 +244,9 @@ Longhorn snapshots are taken per volume. Recurring jobs do not automatically pau
 Odoo or coordinate its filestore with PostgreSQL. For a matched recovery set, stop
 all client Odoo writers with its HPA suspended, wait for transactions to finish,
 then take both snapshots before allowing writes again. PostgreSQL data and WAL
-must remain together on the database volume. Live volume recovery can require
-PostgreSQL crash recovery; volume backups do not provide database point-in-time recovery.
+must remain together on the database volume. If stopping writers detaches a volume,
+use Longhorn's supported detached-volume backup procedure. Live volume recovery can
+require PostgreSQL crash recovery; volume backups do not provide database point-in-time recovery.
 
 After setup, confirm successful remote backups and restore a coordinated pair to
 new volumes in an isolated namespace. Use the matching PostgreSQL major version
@@ -263,9 +267,8 @@ Vault recovery material or access to the object-storage bucket.
 | Longhorn backups to Hetzner Object Storage and restore drill | Planned; manual Longhorn setup and recovery verification required |
 
 Use [the verification guide](docs/verification.md) for cluster checks. Before production,
-configure the Longhorn backup plan above, verify coordinated restores and add external alert delivery.
-Backups should capture both data stores as one recovery set and be stored outside the
-cluster. Restore into separate resources and verify records and attachments.
+configure the Longhorn backup plan above, verify coordinated restores and add
+external alert delivery.
 
 For larger fleets, keep client-specific values, upgrade in small batches and measure
 capacity. GitOps and independently managed HA PostgreSQL clusters can be added later

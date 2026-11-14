@@ -39,8 +39,8 @@ kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" get hpa odoo-odoo
 
 Expected: nodes Ready, metrics API available, numerical CPU values, pods Ready,
 VSO synchronized and claims Bound. `odoo-odoo-data` must be **RWX** on Longhorn;
-`odoo-db-data` must be **RWO**, also on Longhorn. HPA should show the configured limits and numerical
-CPU utilization, not persistent `<unknown>`. Allow time for initial metrics collection.
+`odoo-db-data` must be **RWO**, also on Longhorn. HPA should show the configured
+limits and numerical CPU utilization, not persistent `<unknown>`. Allow time for initial metrics collection.
 No volume migration is needed for these fresh installations.
 
 ## Automatic scaling
@@ -137,3 +137,20 @@ kubectl --context "$TARGET_CONTEXT" -n "$TARGET_NAMESPACE" logs deployment/odoo-
 Record the client, observed replica changes, node placement and results. Do not delete
 PVCs or expose credentials while diagnosing a failure. Scaling verification is not
 proof of database/storage failover or full HA.
+
+## Backup and recovery checks
+
+After manually configuring [Longhorn backups to Hetzner](../DESIGN.md#backups-and-recovery),
+verify the target is available and both volumes of every client have a recurring
+backup job assigned. A healthy local volume or snapshot is not proof of a remote backup.
+
+```sh
+kubectl --context "$TARGET_CONTEXT" -n longhorn-system get backuptargets.longhorn.io
+kubectl --context "$TARGET_CONTEXT" -n longhorn-system get recurringjobs.longhorn.io
+kubectl --context "$TARGET_CONTEXT" -n longhorn-system get backups.longhorn.io
+```
+
+In Longhorn, confirm completed backups, recent successful timestamps and retention
+for each selected volume. Restore a coordinated database/filestore pair into an
+isolated namespace and verify records and attachment downloads. Record the recovery
+point and time taken. This restore drill is still required; it has not been verified locally.
