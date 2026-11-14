@@ -53,7 +53,11 @@ flowchart TB
     end
     Prom -.->|4. Scrapes metrics| Sources
 
+    Longhorn["LONGHORN"] --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
 
+
+    classDef backup fill:#fbe8ec,stroke:#ad6678,color:#492732
+    class Longhorn,Backup,Destination backup
     classDef app fill:#e8f1ff,stroke:#3973ac,color:#152c44
     classDef db fill:#eee8fa,stroke:#8060a8,color:#302145
     classDef secrets fill:#fff1d6,stroke:#b8882c,color:#493510
@@ -64,9 +68,10 @@ flowchart TB
     class MS,HPA,Sources,Prom,Grafana,Alerts metrics
 ```
 
-Solid arrows show application traffic. Dashed arrows show
+Solid arrows show application traffic and the backup path. Dashed arrows show
 secret synchronization, scaling decisions and monitoring interactions. Their labels
-identify the action and direction. Everything except client users runs inside k3s; the boxes separate responsibilities, not cluster nodes.
+identify the action and direction. Client users and Hetzner Object Storage are outside k3s; the other boxes separate
+cluster responsibilities, not nodes.
 
 | Flow | How to read it |
 | --- | --- |
@@ -74,6 +79,7 @@ identify the action and direction. Everything except client users runs inside k3
 | 2. Secrets | VSO reads the client's permitted Vault path and creates Secrets in that client's namespace. |
 | 3. Scaling | Metrics Server supplies CPU usage. Each HPA adjusts its Odoo replicas between 1 and 4; PostgreSQL stays at one replica. |
 | 4. Monitoring | Prometheus scrapes cluster-wide resource usage, workload state, PV/PVC and Service metadata, and Longhorn health. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
+| Backups | Longhorn uploads backups to Hetzner Object Storage. The target, schedules and volume selection are configured manually. |
 
 Each client uses separate Longhorn volumes for Odoo and PostgreSQL. Vault,
 Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes.
