@@ -173,6 +173,27 @@ Substitute the namespace and client file for B or C. Repeat local overrides.
 Application rollouts use `Recreate` and interrupt service. Major Odoo upgrades need
 an explicit database migration; Helm rollback cannot undo schema changes.
 
+## Backups
+
+The backup destination is **Hetzner Cloud Object Storage**, using its
+[S3-compatible API](https://docs.hetzner.com/storage/object-storage/overview/).
+The existing Longhorn installation will be configured manually to upload volume
+backups there; this repository does not configure the target or backup schedules.
+
+```mermaid
+flowchart LR
+    Volumes["Client Odoo and PostgreSQL volumes"] --> Backup["Longhorn backups"]
+    Backup -->|HTTPS / S3 API| Bucket["Private Hetzner Object Storage bucket"]
+```
+
+Include both volumes for every client. Configure the bucket, regional endpoint,
+credentials, recurring jobs, volume selection and retention in Longhorn. Keep
+credentials outside Git and verify completed uploads and restores.
+
+Separate volume backups are not an atomic Odoo recovery point. A coordinated
+backup must preserve matching database records and attachments; see the
+[backup design and restore checks](DESIGN.md#backups-and-recovery).
+
 ## Verify the deployment
 
 Follow [the verification guide](docs/verification.md) to check login, attachments,
@@ -182,5 +203,6 @@ come from `odoo-admin-login` and `odoo-admin-password` in the client's Vault ent
 The application and two-replica shared-data behavior have been verified locally.
 Actual HPA behavior, Longhorn RWX, Vault synchronization and ingress still require
 verification on k3s. This case demonstrates **application scaling**, not full HA:
-PostgreSQL remains a single instance. Backup automation and external alert
-notifications remain future work; monitoring manifests are provided under `services/prometheus/` and `services/grafana/`.
+PostgreSQL remains a single instance. Longhorn-to-Hetzner backup configuration and
+restore verification remain manual setup tasks. External alert notifications also
+need configuration; monitoring manifests are under `services/prometheus/` and `services/grafana/`.

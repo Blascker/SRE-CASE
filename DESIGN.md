@@ -108,6 +108,7 @@ instances or replace backups.
 | CPU-based HPA | Automatically adjust application capacity to load |
 | Vault with VSO | Keep secret values out of Git and Helm values |
 | Shared Prometheus and Grafana | View cluster and client health in one place |
+| Longhorn backups to Hetzner Object Storage | Keep volume backups outside the Kubernetes cluster |
 | Init container | Initialize the database before Odoo accepts requests |
 
 ## Initialization and security
@@ -203,6 +204,46 @@ This initial setup uses one replica per component and internal Services with loc
 port-forward access. It does not replace Metrics Server for HPA or collect logs.
 Application-specific database and Vault health metrics are separate future additions.
 
+## Backups and recovery
+
+Longhorn already provides storage. Its backup target and recurring jobs will be
+configured manually to use a private Hetzner Cloud Object Storage bucket. No backup
+manifests, schedules or credentials are managed by this repository.
+
+```mermaid
+flowchart LR
+    Data["Each client's Odoo volume<br/>and PostgreSQL volume"] --> Longhorn["Existing Longhorn<br/>Volume backups"]
+    Longhorn -->|HTTPS / S3 API| Hetzner["Hetzner Object Storage<br/>Off-cluster backup destination"]
+    Hetzner -.->|Restore to new volumes| Recovery["Isolated recovery namespace"]
+```
+
+Set the bucket's location-specific endpoint, S3 credentials, schedule, retained
+backup count and selected volumes in Longhorn. Hetzner endpoints include
+`fsn1.your-objectstorage.com`, `nbg1.your-objectstorage.com` and
+`hel1.your-objectstorage.com`; use the endpoint matching the bucket's location.
+See [Hetzner's S3 setup](https://docs.hetzner.com/storage/object-storage/getting-started/using-s3-api-tools/)
+and [Longhorn backup targets](https://longhorn.io/docs/1.13.0/snapshots-and-backups/backup-and-restore/set-backup-target/).
+
+| Data | Recovery requirement |
+| --- | --- |
+| Each client's Odoo and PostgreSQL volumes | Select both; record their volume identities and matching recovery point |
+| Grafana, Prometheus and Alertmanager volumes | Select separately if their saved state/history must be retained |
+| Vault and recovery credentials | Maintain a supported Vault snapshot/recovery procedure and keep unseal material and storage credentials outside the cluster |
+
+Longhorn snapshots are taken per volume. Recurring jobs do not automatically pause
+Odoo or coordinate its filestore with PostgreSQL. For a matched recovery set, stop
+all client Odoo writers with its HPA suspended, wait for transactions to finish,
+then take both snapshots before allowing writes again. PostgreSQL data and WAL
+must remain together on the database volume. Live volume recovery can require
+PostgreSQL crash recovery; volume backups do not provide database point-in-time recovery.
+
+After setup, confirm successful remote backups and restore a coordinated pair to
+new volumes in an isolated namespace. Use the matching PostgreSQL major version
+and Odoo image/addons; check database startup, login, records and attachment
+downloads before reopening traffic. Keep the original volumes until recovery is
+verified. A volume backup does not replace Kubernetes manifests, TLS certificates,
+Vault recovery material or access to the object-storage bucket.
+
 ## Validation and next steps
 
 | Validation | Status |
@@ -212,9 +253,10 @@ Application-specific database and Vault health metrics are separate future addit
 | Concurrent initialization and sessions/attachments across two replicas | Verified with a local shared volume |
 | HPA reactions, Longhorn RWX, VSO and shared ingress on k3s | Requires cluster verification |
 | Standalone monitoring manifests, configuration and dashboard | Local configuration checks; metric collection requires cluster verification |
+| Longhorn backups to Hetzner Object Storage and restore drill | Planned; manual Longhorn setup and recovery verification required |
 
 Use [the verification guide](docs/verification.md) for cluster checks. Before production,
-add coordinated database/filestore backups, restore drills and external alert delivery.
+configure the Longhorn backup plan above, verify coordinated restores and add external alert delivery.
 Backups should capture both data stores as one recovery set and be stored outside the
 cluster. Restore into separate resources and verify records and attachments.
 
