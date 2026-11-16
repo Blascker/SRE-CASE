@@ -1,0 +1,36 @@
+{{- if .Values.traefik.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-traefik
+spec:
+  podSelector:
+    matchLabels:
+      app: traefik
+      release: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8443
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: odoo
+              release: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 8069
+        - protocol: TCP
+          port: 8072
+    - to:
+        {{- toYaml .Values.networkPolicy.dnsTo | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

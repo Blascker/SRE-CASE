@@ -1,0 +1,16 @@
+{{- if not .Values.odoo.storage.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-odoo-data
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [{{ .Values.odoo.storage.accessMode | quote }}]
+  {{- with .Values.odoo.storage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.odoo.storage.size }}
+{{- end }}

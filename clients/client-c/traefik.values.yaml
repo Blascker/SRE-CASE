@@ -1,0 +1,11 @@
+# Optional dedicated proxy for client-c; apply after this client's values.yaml.
+# Replace this example host and supply a matching certificate in the client's Vault entry.
+# Database initialization finishes before Odoo starts serving traffic.
+sharedIngress:
+  enabled: false
+traefik:
+  enabled: true
+  host: client-c.odoo.example.com
+  tlsSecret: odoo-tls
+  service:
+    type: LoadBalancer

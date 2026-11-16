@@ -1,0 +1,21 @@
+{{- if .Values.vault.enabled }}
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: {{ .Release.Name }}-vault-auth
+  namespace: {{ .Release.Namespace }}
+spec:
+  vaultConnectionRef: {{ .Release.Name }}-vault
+  method: kubernetes
+  mount: {{ .Values.vault.auth.mount | quote }}
+  {{- with .Values.vault.auth.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  kubernetes:
+    role: {{ .Values.vault.auth.role | quote }}
+    serviceAccount: {{ .Release.Name }}-vault-auth
+    {{- with .Values.vault.auth.audiences }}
+    audiences:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,91 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  serviceName: prometheus-internal
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: true
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v3.16.0-distroless
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.path=/prometheus"
+        - "--storage.tsdb.retention.time=15d"
+        - "--storage.tsdb.retention.size=16GB"
+        ports:
+        - name: http
+          containerPort: 9090
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: '2'
+            memory: 4Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: "/prometheus"
+        - name: config
+          mountPath: "/etc/prometheus"
+          readOnly: true
+        env: []
+        readinessProbe:
+          httpGet:
+            path: "/-/ready"
+            port: http
+          periodSeconds: 10
+        startupProbe:
+          httpGet:
+            path: "/-/ready"
+            port: http
+          periodSeconds: 10
+          failureThreshold: 60
+        livenessProbe:
+          httpGet:
+            path: "/-/healthy"
+            port: http
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: prometheus
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: longhorn
+      resources:
+        requests:
+          storage: 20Gi

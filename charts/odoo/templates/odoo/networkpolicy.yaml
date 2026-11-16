@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-odoo
+spec:
+  podSelector:
+    matchLabels:
+      app: odoo
+      release: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  {{- if or .Values.traefik.enabled .Values.sharedIngress.enabled }}
+  ingress:
+    - from:
+        {{- if .Values.sharedIngress.enabled }}
+        # Both selectors belong to the SAME peer: namespace AND pod labels.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.sharedIngress.controller.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.sharedIngress.controller.podLabels | nindent 14 }}
+        {{- else }}
+        - podSelector:
+            matchLabels:
+              app: traefik
+              release: {{ .Release.Name }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8069
+        - protocol: TCP
+          port: 8072
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+              release: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        {{- toYaml .Values.networkPolicy.dnsTo | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

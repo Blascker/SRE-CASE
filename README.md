@@ -1,1 +1,256 @@
-# SRE-CASE
+# Odoo on Kubernetes
+
+A Helm deployment for three clients on k3s. Each client has its own namespace,
+Odoo application, PostgreSQL instance, storage and Vault credentials.
+Odoo 20 scales automatically from **1 to 4 replicas** using CPU metrics.
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": false, "padding": 24, "nodeSpacing": 40, "rankSpacing": 70, "subGraphTitleMargin": {"top": 16, "bottom": 28}}}}%%
+flowchart TB
+    Users["Client users"] -->|1. HTTPS request| Traefik["Traefik<br/>Routes by client hostname"]
+
+    subgraph Clients["Client namespaces"]
+        direction LR
+        subgraph A["odoo-client-a"]
+            OdooA["Odoo A<br/>1–4 replicas"] -->|SQL| DbA[("PostgreSQL A")]
+        end
+        subgraph B["odoo-client-b"]
+            OdooB["Odoo B<br/>1–4 replicas"] -->|SQL| DbB[("PostgreSQL B")]
+        end
+        subgraph C["odoo-client-c"]
+            OdooC["Odoo C<br/>1–4 replicas"] -->|SQL| DbC[("PostgreSQL C")]
+        end
+    end
+
+    Traefik -->|client-a hostname| OdooA
+    Traefik -->|client-b hostname| OdooB
+    Traefik -->|client-c hostname| OdooC
+
+    subgraph Secrets["Secrets"]
+        Vault["Vault<br/>Client credentials<br/>and certificates"]
+        VSO["Vault Secrets Operator<br/>Synchronizes client secrets"]
+        Vault -.->|2. Synchronize| VSO
+    end
+    VSO -.->|Client-specific Secrets| Clients
+
+    subgraph Autoscaling["Autoscaling"]
+        MS["Metrics Server<br/>Measures pod CPU"]
+        HPA["HPA per client<br/>Sets Odoo replica count"]
+        MS -.->|3. CPU usage| HPA
+    end
+    HPA -.->|Adjusts Odoo replicas only| Clients
+
+    subgraph Infrastructure["Kubernetes infrastructure"]
+        Sources["Metric endpoints<br/>API server, kubelets and exporters<br/>Nodes, pods and Deployments<br/>CPU, memory, PVs, PVCs and Services<br/>Longhorn storage health"]
+    end
+
+    subgraph Monitoring["Monitoring"]
+        Prom["Prometheus<br/>Metrics and alert rules"]
+        Grafana["Grafana<br/>Displays dashboards"]
+        Alerts["Alertmanager<br/>Groups active alerts"]
+        Grafana -.->|Queries metrics| Prom
+        Prom -.->|Firing alerts| Alerts
+    end
+    Prom -.->|4. Scrapes metrics| Sources
+
+    Clients --> Longhorn["LONGHORN"]
+    Longhorn --> Backup["Backup"] --> Destination["Hetzner Object Storage"]
+
+    classDef backup fill:#fbe8ec,stroke:#ad6678,color:#492732
+    class Longhorn,Backup,Destination backup
+    classDef app fill:#e8f1ff,stroke:#3973ac,color:#152c44
+    classDef db fill:#eee8fa,stroke:#8060a8,color:#302145
+    classDef secrets fill:#fff1d6,stroke:#b8882c,color:#493510
+    classDef metrics fill:#e5f4ec,stroke:#46896a,color:#183b2b
+    class Traefik,OdooA,OdooB,OdooC app
+    class DbA,DbB,DbC db
+    class Vault,VSO secrets
+    class MS,HPA,Sources,Prom,Grafana,Alerts metrics
+```
+
+Solid arrows show application traffic and the backup path. Dashed arrows show
+secret synchronization, scaling decisions and monitoring interactions. Their labels
+identify the action and direction. Client users and Hetzner Object Storage are
+outside k3s; the other boxes separate cluster responsibilities, not nodes.
+
+| Flow | How to read it |
+| --- | --- |
+| 1. Client traffic | Traefik selects the client's Odoo by hostname. Odoo connects only to that client's PostgreSQL. |
+| 2. Secrets | VSO reads the client's permitted Vault path and creates Secrets in that client's namespace. |
+| 3. Scaling | Metrics Server supplies CPU usage. Each HPA adjusts its Odoo replicas between 1 and 4; PostgreSQL stays at one replica. |
+| 4. Monitoring | Prometheus scrapes cluster-wide resource usage, workload state, PV/PVC and Service metadata, and Longhorn health. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
+| Backups | Longhorn uploads backups to Hetzner Object Storage. The target, schedules and volume selection are configured manually. |
+
+Each client uses separate Longhorn volumes for Odoo and PostgreSQL. Vault,
+Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes.
+VSO is installed separately. Monitoring pod resources does not yet expose Vault
+seal status or PostgreSQL internal health.
+
+## Project structure
+
+| Location | Purpose |
+| --- | --- |
+| `charts/odoo/` | Reusable Odoo/PostgreSQL chart |
+| [services/vault/](services/vault/) | Shared TLS-enabled Vault StatefulSet and Services |
+| [services/prometheus/](services/prometheus/) | Metrics collection, storage and alerts ([guide](docs/prometheus.md)) |
+| [services/grafana/](services/grafana/) | Kubernetes overview dashboard ([guide](docs/grafana.md)) |
+| `clients/common.values.yaml` | Shared ingress, autoscaling, Longhorn and quota settings |
+| `clients/client-{a,b,c}/values.yaml` | Client database, hostname and Vault identity |
+| `clients/client-{a,b,c}/traefik.values.yaml` | Optional dedicated proxy |
+| [DESIGN.md](DESIGN.md) | Architecture, decisions and limitations |
+| [Client configuration](docs/clients.md) | Scaling and adding clients |
+| [Vault setup](docs/vault.md) | Required secrets and access policies |
+| [Verification](docs/verification.md) | Deployment and scaling checks |
+
+## Prerequisites
+
+- k3s, Helm and kubectl with the intended context selected.
+- Longhorn StorageClass `longhorn` with RWX support and NFSv4 clients on eligible nodes.
+- A working Metrics Server: `kubectl top pods` must return CPU/memory values.
+- Traefik with IngressClass `traefik`, HTTPS and HTTP-to-HTTPS redirection.
+- Vault and Vault Secrets Operator (VSO), configured as described in [Vault setup](docs/vault.md).
+- Real client hostnames, DNS records and matching TLS certificates in Vault.
+- NetworkPolicy enforcement, working cluster DNS and storage permissions for Odoo
+  UID/GID 1000 and PostgreSQL UID/GID 999.
+
+Match `sharedIngress.controller.namespace` and `podLabels` to the actual controller.
+The common values assume namespace `traefik`; k3s-packaged Traefik normally runs in
+`kube-system`. Both client volumes use Longhorn: RWX for Odoo, a separate RWO volume
+for PostgreSQL.
+
+Install [Prometheus](docs/prometheus.md) and [Grafana](docs/grafana.md) to view
+nodes, pods, workload health, PVC usage and alerts across all clients. The guides include
+plain-manifest installation, Grafana login and verification of metric collection.
+
+## Install a client with Helm
+
+Run from the repository root. Set the context and replace example hostnames before
+installation. Complete [Vault/VSO setup](docs/vault.md), including each client's KV
+entry and private-CA trust Secret if needed, first. These are fresh installations;
+Helm creates the volumes and the init container initializes Odoo automatically.
+
+```sh
+export TARGET_CONTEXT='your-k3s-context'
+
+helm install odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a --create-namespace \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml \
+  --wait --timeout 15m
+
+helm install odoo charts/odoo \
+  --kube-context "$TARGET_CONTEXT" \
+  --namespace odoo-client-b --create-namespace \
+  -f clients/common.values.yaml -f clients/client-b/values.yaml \
+  --wait --timeout 15m
+
+helm install odoo charts/odoo \
+  --kube-context "$TARGET_CONTEXT" \
+  --namespace odoo-client-c --create-namespace \
+  -f clients/common.values.yaml -f clients/client-c/values.yaml \
+  --wait --timeout 15m
+```
+
+If environment overrides are needed, add an ignored `-f cluster.local.yaml` after
+client values on every install/upgrade. Keep passwords and private keys in Vault.
+The release name `odoo` is reused because each client has a separate namespace.
+
+## What the installation creates
+
+Each client has an Odoo Deployment, a single PostgreSQL StatefulSet, an HPA and
+two separate Longhorn PVCs. With release name `odoo`, the storage is:
+
+| PVC | Container location | Storage |
+| --- | --- | --- |
+| `odoo-odoo-data` | `/var/lib/odoo` | 10 GiB RWX for shared sessions and attachments |
+| `odoo-db-data` | `/var/lib/postgresql/data/pgdata` (PGDATA) | 20 GiB RWO for database files and WAL |
+
+Both Services are internal. Traefik routes normal requests to `odoo-odoo:8069`
+and `/websocket` to `odoo-odoo:8072`. Odoo connects to
+`odoo-db.<client-namespace>.svc.cluster.local:5432`.
+
+Shared ingress is the default. For a dedicated client proxy, append
+`-f clients/client-a/traefik.values.yaml` after the normal client values on both
+install and upgrade, substituting B or C as needed. Exactly one proxy mode must
+be enabled. See [client configuration](docs/clients.md#values-and-overrides).
+
+At startup, the init containers prepare private configuration and check the database.
+An empty database receives the base/web modules and initial administrator without
+demo data. Later pod starts preserve existing users and passwords. Incomplete setup
+or an incompatible Odoo major version blocks startup for recovery or migration.
+
+The HPA scales Odoo between 1 and 4 replicas at 70% average CPU utilization.
+Scale-up permits one additional pod per minute; scale-down stabilizes for five
+minutes before removing at most one pod per minute. PostgreSQL stays at one replica.
+See [scaling and capacity](docs/clients.md#autoscaling-and-capacity) before changing
+replica limits or connection pools.
+
+## Validate and update
+
+Check the client configuration locally before installation or changes:
+
+```sh
+helm lint --strict charts/odoo \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml
+helm template odoo charts/odoo --namespace odoo-client-a \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml
+```
+
+Apply configuration changes with the same values files:
+
+```sh
+helm upgrade odoo charts/odoo \
+  --kube-context "${TARGET_CONTEXT:?Set TARGET_CONTEXT first}" \
+  --namespace odoo-client-a --reset-values \
+  -f clients/common.values.yaml -f clients/client-a/values.yaml \
+  --wait --timeout 15m
+```
+
+Substitute the namespace and client file for B or C. Repeat local overrides.
+Application rollouts use `Recreate` and interrupt service. Major Odoo upgrades need
+an explicit database migration; Helm rollback cannot undo schema changes.
+
+## Backups
+
+The backup destination is **Hetzner Cloud Object Storage**, using its
+[S3-compatible API](https://docs.hetzner.com/storage/object-storage/overview/).
+The existing Longhorn installation will be configured manually to upload volume
+backups there; this repository does not configure the target or backup schedules.
+
+```mermaid
+flowchart LR
+    Volumes["Client Odoo and PostgreSQL volumes"] --> Backup["Longhorn backups"]
+    Backup -->|HTTPS / S3 API| Bucket["Private Hetzner Object Storage bucket"]
+```
+
+Include both volumes for every client. Configure the bucket, regional endpoint,
+credentials, recurring jobs, volume selection and retention in Longhorn. Keep
+credentials outside Git and verify completed uploads and restores.
+
+Use the endpoint matching the bucket's location:
+
+| Location | S3 endpoint |
+| --- | --- |
+| Falkenstein | `https://fsn1.your-objectstorage.com` |
+| Nuremberg | `https://nbg1.your-objectstorage.com` |
+| Helsinki | `https://hel1.your-objectstorage.com` |
+
+Assign the recurring job/group to both client volumes in Longhorn. If using PVC
+labels instead, `recurring-job.longhorn.io/source=enabled` allows Longhorn to sync
+their job/group selection to the volumes; the selected job/group must already exist.
+The chart currently does not apply backup-selection labels.
+
+Separate volume backups are not an atomic Odoo recovery point. A coordinated
+backup must preserve matching database records and attachments; see the
+[backup design and restore checks](DESIGN.md#backups-and-recovery).
+
+The client PVCs are retained on Helm uninstall, but namespace deletion or storage
+loss can still remove them. Retention and Longhorn replication do not replace
+remote backups. Importing an existing RWO application volume requires copying data
+to an RWX claim selected with `odoo.storage.existingClaim`; fresh installs need no migration.
+
+## Verify the deployment
+
+Follow [the verification guide](docs/verification.md) to check login, attachments,
+WebSockets, shared storage and automatic scale-up/down. Initial web login credentials
+come from `odoo-admin-login` and `odoo-admin-password` in the client's Vault entry.

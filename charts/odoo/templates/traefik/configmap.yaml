@@ -1,0 +1,77 @@
+{{- if .Values.traefik.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-traefik-config
+data:
+  # Static configuration: listeners and the file provider.
+  traefik.yaml: |
+    entryPoints:
+      web:
+        address: ":8000"
+        http:
+          redirections:
+            entryPoint:
+              to: ":443"
+              scheme: https
+              permanent: true
+      websecure:
+        address: ":8443"
+        transport:
+          respondingTimeouts:
+            readTimeout: 180s
+            writeTimeout: 180s
+            idleTimeout: 180s
+      health:
+        address: ":8082"
+    providers:
+      file:
+        filename: /etc/traefik/routes.yaml
+        watch: true
+    ping:
+      entryPoint: health
+    log:
+      level: INFO
+      format: json
+    accessLog:
+      format: json
+      fields:
+        headers:
+          defaultMode: drop
+    serversTransport:
+      forwardingTimeouts:
+        dialTimeout: 10s
+        responseHeaderTimeout: 150s
+  # Dynamic configuration: routes, internal FQDN upstreams and TLS files.
+  routes.yaml: |
+    http:
+      routers:
+        odoo:
+          rule: 'Host(`{{ .Values.traefik.host }}`)'
+          entryPoints: [websecure]
+          service: odoo
+          priority: 10
+          tls: {}
+        websocket:
+          rule: 'Host(`{{ .Values.traefik.host }}`) && PathPrefix(`/websocket`)'
+          entryPoints: [websecure]
+          service: websocket
+          priority: 20
+          tls: {}
+      services:
+        odoo:
+          loadBalancer:
+            servers:
+              - url: "http://{{ .Release.Name }}-odoo.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:8069"
+        websocket:
+          loadBalancer:
+            servers:
+              - url: "http://{{ .Release.Name }}-odoo.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:8072"
+    tls:
+      certificates:
+        - certFile: /certs/tls.crt
+          keyFile: /certs/tls.key
+      options:
+        default:
+          minVersion: VersionTLS12
+{{- end }}

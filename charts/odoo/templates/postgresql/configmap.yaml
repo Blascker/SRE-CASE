@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-db-init
+data:
+  # The official Postgres image runs this ONLY when its data directory is empty.
+  # Odoo gets its own role; the postgres superuser stays separate.
+  # Provision the empty database here; Odoo only initializes its schema.
+  01-odoo.sql: |
+    \getenv odoo_user ODOO_DB_USER
+    \getenv odoo_password ODOO_DB_PASSWORD
+    \getenv odoo_database ODOO_DATABASE
+    CREATE ROLE :"odoo_user" LOGIN PASSWORD :'odoo_password' NOCREATEDB NOSUPERUSER NOCREATEROLE;
+    CREATE DATABASE :"odoo_database" OWNER :"odoo_user" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C';
+    \connect :odoo_database
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;

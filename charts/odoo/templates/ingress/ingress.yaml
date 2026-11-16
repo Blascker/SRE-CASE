@@ -1,0 +1,33 @@
+{{- if .Values.sharedIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-odoo
+  {{- with .Values.sharedIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.sharedIngress.className | quote }}
+  tls:
+    - hosts: [{{ .Values.sharedIngress.host | quote }}]
+      secretName: {{ .Values.sharedIngress.tlsSecret }}
+  rules:
+    - host: {{ .Values.sharedIngress.host | quote }}
+      http:
+        paths:
+          - path: /websocket
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-odoo
+                port:
+                  name: websocket
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-odoo
+                port:
+                  name: http
+{{- end }}

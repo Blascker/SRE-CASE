@@ -1,0 +1,6 @@
+apiVersion: v2
+name: odoo
+description: Isolated Odoo and PostgreSQL per client, with dedicated or shared ingress and Vault secrets
+type: application
+version: 0.7.0
+appVersion: "20.0"

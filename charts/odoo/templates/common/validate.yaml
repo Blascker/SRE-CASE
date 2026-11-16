@@ -1,0 +1,115 @@
+{{/* Helm checks only: this file intentionally emits no Kubernetes resource. */}}
+{{- $exposed := or .Values.traefik.enabled .Values.sharedIngress.enabled }}
+{{- $tlsSecret := ternary .Values.sharedIngress.tlsSecret .Values.traefik.tlsSecret .Values.sharedIngress.enabled }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.odoo.replicas)) }}
+{{- fail "odoo.replicas must be a positive integer" }}
+{{- end }}
+{{- $maximumReplicas := int .Values.odoo.replicas }}
+{{- if .Values.odoo.autoscaling.enabled }}
+{{- range $key := list "minReplicas" "maxReplicas" "targetCPUUtilizationPercentage" }}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString (index $.Values.odoo.autoscaling $key))) }}
+{{- fail (printf "odoo.autoscaling.%s must be a positive integer" $key) }}
+{{- end }}
+{{- end }}
+{{- if lt (int .Values.odoo.autoscaling.maxReplicas) (int .Values.odoo.autoscaling.minReplicas) }}
+{{- fail "odoo.autoscaling.maxReplicas must be at least minReplicas" }}
+{{- end }}
+{{- if not .Values.odoo.resources.requests.cpu }}
+{{- fail "CPU autoscaling requires odoo.resources.requests.cpu" }}
+{{- end }}
+{{- $maximumReplicas = int .Values.odoo.autoscaling.maxReplicas }}
+{{- end }}
+{{- if not (has .Values.odoo.storage.accessMode (list "ReadWriteOnce" "ReadWriteMany")) }}
+{{- fail "odoo.storage.accessMode must be ReadWriteOnce or ReadWriteMany" }}
+{{- end }}
+{{- if and (gt $maximumReplicas 1) (ne .Values.odoo.storage.accessMode "ReadWriteMany") }}
+{{- fail "Multiple Odoo replicas require ReadWriteMany storage for shared sessions and filestore" }}
+{{- end }}
+{{- if or (lt (int .Values.odoo.dbMaxconn) 1) (lt (int .Values.odoo.dbMaxconnGevent) 1) (lt (int .Values.odoo.maxCronThreads) 0) (lt (int .Values.postgresql.connectionReserve) 0) }}
+{{- fail "Database pool sizes must be positive; cron threads and connectionReserve cannot be negative" }}
+{{- end }}
+{{/* Conservative process-pool budget: HTTP + cron + master, plus gevent. */}}
+{{- $perReplica := add (mul (add (int .Values.odoo.workers) (int .Values.odoo.maxCronThreads) 1) (int .Values.odoo.dbMaxconn)) (int .Values.odoo.dbMaxconnGevent) }}
+{{- if gt (add (mul $maximumReplicas $perReplica) (int .Values.postgresql.connectionReserve)) (int .Values.postgresql.maxConnections) }}
+{{- fail "Odoo replica/worker connection budget exceeds postgresql.maxConnections; reduce pool sizes/replicas or tune PostgreSQL capacity" }}
+{{- end }}
+{{- if and .Values.traefik.enabled .Values.sharedIngress.enabled }}
+{{- fail "Enable only one of traefik.enabled and sharedIngress.enabled" }}
+{{- end }}
+{{- if not .Values.existingSecret }}
+{{- fail "existingSecret must name the Secret containing database, master and initial web login credentials" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.database) }}
+{{- fail "odoo.database must use lowercase letters, digits and underscores" }}
+{{- end }}
+{{- if or .Values.odoo.listDb (not .Values.odoo.proxyMode) }}
+{{- fail "Keep odoo.listDb=false and odoo.proxyMode=true; database initialization is automatic" }}
+{{- end }}
+{{- if lt (int .Values.odoo.initializationWaitSeconds) 1 }}
+{{- fail "odoo.initializationWaitSeconds must be positive" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z_][a-z0-9_]*$" .Values.odoo.databaseUser) }}
+{{- fail "odoo.databaseUser must use lowercase letters, digits and underscores" }}
+{{- end }}
+{{- if lt (int .Values.odoo.workers) 1 }}
+{{- fail "odoo.workers must be at least 1 for the WebSocket worker" }}
+{{- end }}
+{{- if hasKey .Values "ingress" }}
+{{- fail "Use traefik for a dedicated proxy or sharedIngress for an existing ingress controller; ingress is obsolete" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.clusterDomain) }}
+{{- fail "clusterDomain must be a valid DNS domain, for example cluster.local" }}
+{{- end }}
+{{- if not .Values.networkPolicy.dnsTo }}
+{{- fail "networkPolicy.dnsTo must identify the cluster DNS endpoints" }}
+{{- end }}
+{{- if not (has .Values.traefik.service.type (list "ClusterIP" "LoadBalancer")) }}
+{{- fail "traefik.service.type must be ClusterIP or LoadBalancer" }}
+{{- end }}
+{{- if .Values.traefik.enabled }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.traefik.host) }}
+{{- fail "traefik.host must be a DNS hostname" }}
+{{- end }}
+{{- if not .Values.traefik.tlsSecret }}
+{{- fail "traefik.tlsSecret must reference an existing TLS Secret" }}
+{{- end }}
+{{- end }}
+{{- if .Values.sharedIngress.enabled }}
+{{- if not (regexMatch "^[a-z0-9]+([.-][a-z0-9]+)*$" .Values.sharedIngress.host) }}
+{{- fail "sharedIngress.host must be a DNS hostname" }}
+{{- end }}
+{{- if or (not .Values.sharedIngress.className) (not .Values.sharedIngress.tlsSecret) }}
+{{- fail "sharedIngress.className and sharedIngress.tlsSecret are required" }}
+{{- end }}
+{{- if or (not .Values.sharedIngress.controller.namespace) (not .Values.sharedIngress.controller.podLabels) }}
+{{- fail "sharedIngress.controller namespace and podLabels must identify the ingress controller" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.resourceQuota.enabled (not .Values.resourceQuota.hard) }}
+{{- fail "resourceQuota.hard is required when quotas are enabled" }}
+{{- end }}
+{{- if .Values.vault.enabled }}
+{{- if not (has .Values.vault.server.scheme (list "http" "https")) }}
+{{- fail "vault.server.scheme must be http or https" }}
+{{- end }}
+{{- range $key := list "service" "namespace" }}
+{{- if not (index $.Values.vault.server $key) }}
+{{- fail (printf "vault.server.%s is required when VSO is enabled" $key) }}
+{{- end }}
+{{- end }}
+{{- if or (lt (int .Values.vault.server.port) 1) (gt (int .Values.vault.server.port) 65535) }}
+{{- fail "vault.server.port must be between 1 and 65535" }}
+{{- end }}
+{{- if or (not .Values.vault.auth.mount) (not .Values.vault.auth.role) }}
+{{- fail "vault.auth.mount and vault.auth.role are required when VSO is enabled" }}
+{{- end }}
+{{- if or (not .Values.vault.kvMount) (not .Values.vault.credentialsPath) }}
+{{- fail "vault.kvMount and vault.credentialsPath are required when VSO is enabled" }}
+{{- end }}
+{{- if and $exposed (not .Values.vault.tlsPath) }}
+{{- fail "vault.tlsPath is required when a proxy or ingress and VSO are enabled" }}
+{{- end }}
+{{- if and $exposed (eq .Values.existingSecret $tlsSecret) }}
+{{- fail "Credentials and TLS must use different destination Secret names" }}
+{{- end }}
+{{- end }}
