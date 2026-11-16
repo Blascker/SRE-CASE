@@ -266,30 +266,3 @@ namespace using the matching PostgreSQL major version and Odoo image/addons. Che
 startup, login, business records and attachment downloads before reopening traffic.
 Record the recoverable point and recovery time, and retain the original volumes
 until the restored service is verified. A completed upload is not proof of recovery.
-
-## Delivery, upgrades and validation
-
-Client Helm releases provide a repeatable deployment boundary. I would validate
-changes on one client before a staged rollout rather than update the entire fleet
-together. Client-specific values keep hostnames, database identities and Vault paths
-separate from shared deployment logic. Shared services use plain StatefulSet manifests
-and need their own update procedures.
-
-Odoo major upgrades require compatible database migration and addons. The startup
-guard detects a version mismatch but does not perform migration. Helm rollback
-cannot reverse database schema changes. Take a coordinated recovery set before
-application changes that affect data and verify compatibility before release.
-
-| Area | Evidence and current status |
-| --- | --- |
-| Helm configuration and client profiles | Rendered and checked locally |
-| Fresh initialization, login, attachments, HTTPS and WebSockets | Verified in local containers |
-| Concurrent initialization and shared sessions/files | Verified across two containers sharing a local volume |
-| Monitoring configuration and dashboard queries | Local configuration checks; collection on k3s still unverified |
-| HPA, cross-node Longhorn RWX, VSO and shared ingress | Target-cluster verification required |
-| Hetzner backups and application restore | Manual setup and restore drill required |
-
-The main gaps before production are cluster verification, coordinated and tested
-backups, external alert delivery, and detection of silent business failures. Full HA
-requires further database and rollout design. The [verification guide](docs/verification.md)
-defines current checks; these gaps remain explicit rather than implied by running pods.

@@ -254,10 +254,3 @@ to an RWX claim selected with `odoo.storage.existingClaim`; fresh installs need 
 Follow [the verification guide](docs/verification.md) to check login, attachments,
 WebSockets, shared storage and automatic scale-up/down. Initial web login credentials
 come from `odoo-admin-login` and `odoo-admin-password` in the client's Vault entry.
-
-The application and two-replica shared-data behavior have been verified locally.
-Actual HPA behavior, Longhorn RWX, Vault synchronization and ingress still require
-verification on k3s. This case demonstrates **application scaling**, not full HA:
-PostgreSQL remains a single instance. Longhorn-to-Hetzner backup configuration and
-restore verification remain manual setup tasks. External alert notifications also
-need configuration; monitoring manifests are under `services/prometheus/` and `services/grafana/`.
