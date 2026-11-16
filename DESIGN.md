@@ -1,10 +1,28 @@
-# Design
+# System design and decisions
+
+## Goals and assumptions
+
+The design runs an independent Odoo environment for each client while keeping
+provisioning and operations consistent as the fleet grows. Three client profiles
+exercise the deployment pattern; supporting 100–500 clients requires capacity
+planning and operational automation, not simply increasing the number of profiles.
+
+I chose k3s and Helm because Kubernetes supplies scheduling, resource controls,
+service discovery and autoscaling, while one chart keeps client deployments
+consistent. This assumes an existing k3s cluster, Longhorn, Metrics Server and
+Traefik. The official Odoo 20 image runs the application; PostgreSQL 16 stores
+business data. Installation commands belong in [README](README.md) and the
+[operational guides](docs/clients.md).
+
+The scope prioritizes client isolation and application scaling. Production use
+still requires cluster verification, manually configured backups, recovery drills
+and alert delivery. The current deployment does not provide full application HA.
 
 ## Architecture
 
-The deployment uses one Helm chart and a separate release namespace per client.
-Odoo 20 runs behind a shared Traefik controller. Each client owns its PostgreSQL 16
-instance and two separate Longhorn volumes: RWX for Odoo, RWO for PostgreSQL.
+Each client owns a namespace, Odoo Deployment, PostgreSQL StatefulSet and two
+persistent volumes. Shared services handle ingress, secret synchronization and
+monitoring. The diagram includes the planned, manually configured backup path.
 
 ```mermaid
 %%{init: {"flowchart": {"htmlLabels": false, "padding": 24, "nodeSpacing": 40, "rankSpacing": 70, "subGraphTitleMargin": {"top": 16, "bottom": 28}}}}%%
@@ -70,152 +88,152 @@ flowchart TB
     class MS,HPA,Sources,Prom,Grafana,Alerts metrics
 ```
 
-Solid arrows show application traffic and the backup path. Dashed arrows show
-secret synchronization, scaling decisions and monitoring interactions. Their labels
-identify the action and direction. Client users and Hetzner Object Storage are
-outside k3s; the other boxes separate cluster responsibilities, not nodes.
+Solid arrows show application traffic, storage and the backup path. Dashed arrows
+show secret synchronization, scaling decisions and monitoring interactions. Client
+users and Hetzner Object Storage are outside k3s; the boxes group responsibilities,
+not physical nodes. VSO is installed separately from the supplied Vault manifests.
 
-| Flow | How to read it |
-| --- | --- |
-| 1. Client traffic | Traefik selects the client's Odoo by hostname. Odoo connects only to that client's PostgreSQL. |
-| 2. Secrets | VSO reads the client's permitted Vault path and creates Secrets in that client's namespace. |
-| 3. Scaling | Metrics Server supplies CPU usage. Each HPA adjusts its Odoo replicas between 1 and 4; PostgreSQL stays at one replica. |
-| 4. Monitoring | Prometheus scrapes cluster-wide resource usage, workload state, PV/PVC and Service metadata, and Longhorn health. Grafana queries Prometheus; Alertmanager groups alerts. External notifications need configuration. |
-| Backups | Longhorn uploads backups to Hetzner Object Storage. The target, schedules and volume selection are configured manually. |
+## Main decisions and tradeoffs
 
-Each client uses separate Longhorn volumes for Odoo and PostgreSQL. Vault,
-Prometheus, Grafana and Alertmanager have their own Longhorn RWO volumes.
-VSO is installed separately. Monitoring pod resources does not yet expose Vault
-seal status or PostgreSQL internal health.
+| Choice | Why I chose it | Tradeoff |
+| --- | --- | --- |
+| One Helm chart, client-specific values | Reuse deployment logic and review client differences in small files | Chart changes need validation and staged rollout across clients |
+| A namespace and PostgreSQL instance per client | Separate credentials, data, quotas and upgrade/recovery lifecycles | More database processes, connections and backups than a shared database server |
+| Shared Traefik ingress | Route client hostnames without a proxy/load balancer per client | Shared infrastructure has a wider failure impact; a dedicated proxy remains optional |
+| Longhorn RWX for Odoo | Replicas need the same attachment filestore and sessions | Depends on network storage and NFS client support; adds shared storage dependencies |
+| Separate Longhorn RWO for PostgreSQL | Keep database files and WAL together, separate from application files | Storage replication does not create PostgreSQL standbys or database failover |
+| CPU HPA for each client | Adjust Odoo capacity automatically using existing Kubernetes mechanisms | CPU does not reveal every database or storage bottleneck |
+| Vault with VSO | Keep secret values outside Git/Helm and synchronize per-client Secrets | Requires Vault availability, unsealing, policies and operator lifecycle management |
+| Database initialization in an init container | Make a fresh client usable without a separate bootstrap installation | Must safely handle retries, concurrent pods and incompatible databases |
+| Prometheus and Grafana as StatefulSets | Keep shared services in explicit manifests with persistent state | Provisioning, updates, collectors, dashboards and alerts must be maintained directly |
+| Longhorn backups to Hetzner Object Storage | Use existing storage tooling to keep recovery data outside the cluster | Volume backups need coordinated recovery points and tested restores |
 
-The chart can alternatively run a dedicated Traefik proxy per client. Exactly one
-proxy mode is enabled. Shared ingress is the default for the three client profiles.
-Odoo and PostgreSQL Services remain internal; Odoo connects to its database using
-`odoo-db.<client-namespace>.svc.cluster.local:5432`.
+## Security and client isolation
 
-| Consumer | PVC | Container location | Storage |
-| --- | --- | --- | --- |
-| Odoo replicas | `odoo-odoo-data` | `/var/lib/odoo` | Longhorn RWX, 10 GiB |
-| PostgreSQL | `odoo-db-data` | `/var/lib/postgresql/data/pgdata` | Longhorn RWO, 20 GiB |
+Namespaces separate Kubernetes resources, but they are not a complete security
+boundary. NetworkPolicies restrict Odoo ingress to the configured proxy and egress
+to its own database and DNS. Controller namespace and pod labels must match the
+actual ingress installation. SMTP and other integrations need explicit egress rules.
+Cluster RBAC, Secret encryption at rest and CNI enforcement remain infrastructure
+responsibilities. Quotas limit client consumption rather than reserving node capacity.
 
-RWX lets Odoo replicas share files across nodes. PostgreSQL writes its database and
-WAL to its own RWO volume; it does not share Odoo's volume. Longhorn replicates volume
-blocks according to its configuration, but this does not add PostgreSQL standby
-instances or replace backups.
+Odoo runs as UID/GID 1000 and PostgreSQL as UID/GID 999, with restricted capabilities,
+no privilege escalation and no mounted ServiceAccount token. The application role
+cannot create databases or roles and has no superuser privileges. Odoo database
+listing is disabled. These choices reduce the privileges available after an
+application compromise, while clients still share the cluster's nodes and kernel.
 
-## Main decisions
+VSO authenticates through a client-specific ServiceAccount bound to a Vault role
+that can read only that client's KV path. It creates local credential and TLS
+Secrets. The main Odoo container never mounts the PostgreSQL administrator password
+or initial web-login credentials. Private CA verification stays enabled. Database
+password rotation must update SQL and Vault together; changing a Secret alone does
+not change a PostgreSQL password. See [Vault setup](docs/vault.md).
 
-| Decision | Reason |
-| --- | --- |
-| One chart, separate client values | Consistent deployment without copying templates |
-| Namespace and PostgreSQL per client | Separate credentials, storage, capacity and lifecycle |
-| Shared ingress | Avoid a proxy/load balancer for every client by default |
-| Longhorn RWX application volume | All Odoo replicas need the same sessions and attachments |
-| CPU-based HPA | Automatically adjust application capacity to load |
-| Vault with VSO | Keep secret values out of Git and Helm values |
-| Shared Prometheus and Grafana | View cluster and client health in one place |
-| Longhorn backups to Hetzner Object Storage | Keep volume backups outside the Kubernetes cluster |
-| Init container | Initialize the database before Odoo accepts requests |
+The shared services have different access needs: Vault requires TokenReview,
+Prometheus requires node-proxy access, and node-exporter reads host metrics through
+host mounts and namespaces. Their permissions must not be treated as equivalent to
+those of the application pods. The three Vault instances also need protected
+unseal material and controlled, one-at-a-time updates.
 
-## Initialization and security
+## Data persistence and initialization
 
-```mermaid
-flowchart TB
-    Vault["Client Vault path"] --> VSO["VSO creates local Secrets"]
-    VSO --> Config["prepare-config: private runtime configuration"]
-    VSO --> PG["PostgreSQL creates database and restricted owner"]
-    Config --> Init["initialize-database: acquire database lock"]
-    PG --> Init
-    Init --> Check{"Setup complete and version compatible?"}
-    Check -->|"Yes"| Start["Start Odoo"]
-    Check -->|"New database"| Setup["Install base/web and initial administrator"]
-    Setup --> Start
-    Check -->|"Incomplete or incompatible"| Block["Stop for recovery or migration"]
-```
+| Data | Storage | Reason |
+| --- | --- | --- |
+| Odoo sessions and attachments | Per-client 10 GiB RWX PVC at `/var/lib/odoo` | All replicas must see the same files |
+| PostgreSQL database and WAL | Per-client 20 GiB RWO PVC; PGDATA at `/var/lib/postgresql/data/pgdata` | Preserve the complete database independently of Odoo pod replacement |
+| Vault, Prometheus, Grafana and Alertmanager | Separate Longhorn RWO volumes | Preserve shared-service state across pod replacement |
 
-Both init containers run when a pod is created. Configuration is rebuilt for that
-pod; database setup runs only when needed. Concurrent initializers wait on a
-PostgreSQL advisory lock. Administrator setup and its completion marker commit
-together, so restarts preserve existing users and passwords. Demo data is disabled.
+The client PVCs are retained on Helm uninstall, but namespace deletion or storage
+loss can still destroy them. Longhorn block replication and local snapshots do not
+replace external backups. Fresh installs need no volume migration; importing an
+existing RWO Odoo volume requires copying its data to an RWX claim.
 
-The application database role has no superuser, role-management or database-creation
-privileges. Database listing stays disabled. Client workloads run as non-root with
-restricted capabilities and no mounted service-account token. The main Odoo container does not mount the
-initial web-login credentials or the PostgreSQL administrator password.
+I chose initialization that is safe to repeat because every new pod runs its init
+containers. The first prepares private configuration; the second waits for
+PostgreSQL and acquires a database advisory lock. An empty database receives the
+base/web modules and initial administrator without demo data. Concurrent replicas
+wait rather than initializing the same database together.
 
-NetworkPolicies allow the configured proxy to reach Odoo, and Odoo to reach only its
-client's database and DNS. Proxy access matches its namespace and pod labels together.
-SMTP and external integrations need explicit egress rules. Kubernetes RBAC, Secret
-encryption at rest and CNI policy enforcement remain cluster responsibilities.
+A completion marker preserves existing users and passwords on later starts.
+Incomplete initialization or an incompatible Odoo major version blocks startup
+instead of resetting data. This makes failures visible and recoverable, but leaves
+repair and major-version migration as explicit operator work.
 
-## Automatic scaling
+## Scaling and reliability
 
-Each client has an HPA with a default range of 1–4 Odoo replicas and a target of 70%
-average CPU utilization. It adds at most one pod per minute. Scale-down stabilizes
-for five minutes and removes at most one pod per minute. Metrics Server supplies
-usage; the Deployment leaves replica count under HPA control.
+Each client HPA controls 1–4 Odoo replicas at 70% average CPU utilization. It can add
+one pod per minute; scale-down waits five minutes and removes at most one per minute.
+Metrics Server supplies usage. Prometheus serves observability rather than the CPU
+HPA. Helm omits the Deployment replica count when the HPA is enabled.
 
-All replicas use the same database, image and RWX data directory. Odoo's standard
-cron workers coordinate jobs through PostgreSQL row locks. Custom jobs must handle
-retries and external side effects appropriately.
-
-The chart rejects multiple replicas with RWO application storage and checks this
-conservative connection budget at the maximum replica count:
+Replicas share the same database, image and RWX data directory. PostgreSQL row locks
+coordinate standard Odoo cron jobs; custom jobs still need safe retries and external
+side-effect handling. The chart rejects multiple replicas with RWO application
+storage and bounds database connection demand:
 
 ```text
 maxReplicas × ((workers + cronWorkers + 1) × dbMaxconn + dbMaxconnGevent)
   + connectionReserve <= PostgreSQL maxConnections
 ```
 
-With client defaults, four replicas budget 80 application connections plus 20 reserved
-connections against a database limit of 100. Quotas allow that replica range. Higher
-limits require reviewing database resources, node capacity and storage performance.
-CPU autoscaling does not detect every database or I/O bottleneck.
+Four replicas budget 80 application connections plus 20 reserved against the default
+limit of 100. Increasing the replica limit therefore requires reviewing pools,
+database resources, quotas and node capacity together.
 
-## Persistence and operational limits
+The main availability limits are deliberate and visible: PostgreSQL remains a
+single instance, Odoo uses `Recreate` rollouts, and no application placement or
+failover guarantee is configured. More replicas improve application capacity but
+do not remove these failure points. Database HA and less disruptive rollouts would
+be a separate next step with corresponding storage and operational changes.
 
-Fresh installs create new volumes; no migration is needed. Existing RWO application
-data would require copying to a new RWX claim selected through `odoo.storage.existingClaim`.
-Both chart-managed PVCs are retained on Helm uninstall, but namespace deletion or
-storage loss can still remove data. Retention and Longhorn replication are not backups.
+At minimum replicas, 100 client profiles request 75 CPU cores, 125 GiB memory and
+3,000 GiB logical storage before shared services, Longhorn replication and spare
+capacity. This illustrates the cost of dedicated databases; it is not a measured
+capacity claim. Larger fleets need automated onboarding, staged upgrades, backup
+assignment and capacity monitoring. Cluster partitioning can limit the impact of
+shared infrastructure failures as the fleet grows.
 
-This implementation prioritizes application scaling over full HA. PostgreSQL and the optional
-dedicated proxy remain single instances. `Recreate` application rollouts interrupt
-service; no node-placement or database-failover guarantee is configured.
+## Observability and silent failures
 
-Major Odoo upgrades require a compatible database migration and addons. The initializer
-blocks a database from a different Odoo major series. Application/module changes need
-backup and maintenance planning; Helm rollback cannot reverse database changes.
-Database password changes must be coordinated between SQL and Vault.
+Prometheus collects Kubernetes object state through kube-state-metrics, resource
+usage through kubelet/cAdvisor and node-exporter, and Longhorn storage metrics.
+Grafana provides a namespace-filtered overview; Alertmanager groups firing alerts.
+The shared stack runs once rather than once per client. Services remain internal
+and are accessed through local port-forwards. See [Prometheus](docs/prometheus.md)
+and [Grafana](docs/grafana.md) for installation and access.
 
-Logs go to container stdout/stderr. Probes check process health and database-server
-reachability, not business workflows; operational checks must also cover attachments,
-scheduled jobs and backup freshness.
+I separate process health from successful business operations: a healthy HTTP
+process does not prove that login, attachments, scheduled jobs or backups work.
 
-## Monitoring
+| Failure | Existing signal | Remaining requirement |
+| --- | --- | --- |
+| Odoo stops responding or cannot reach its database | HTTP startup/liveness/readiness probes; pod readiness and restart alerts | Validate actual behavior on k3s |
+| A pod runs but stays unready, or storage fills | Prometheus readiness, restart, PVC and scrape-target rules | Configure external notification receivers and response ownership |
+| Login or attachment operations fail while health probes pass | Manual verification of login and file upload/download across replicas | Add a scheduled synthetic business-workflow check |
+| Scheduled business jobs stop producing results | Container logs and basic workload/resource metrics | Monitor job completion/freshness, not just the Odoo process |
+| Secret synchronization or Vault availability fails | VSO resource status/events, workload readiness and manual Vault checks | Add explicit sync-freshness and Vault seal/quorum alerts |
+| Backups stop, become stale or cannot restore | Planned Longhorn backup status checks and restore drill | Configure backup freshness/failure alerts and repeat restore verification |
 
-One [Prometheus installation](docs/prometheus.md) and
-[Grafana instance](docs/grafana.md) in namespace
-`monitoring` observes all clients and infrastructure. Prometheus collects node,
-kubelet, Kubernetes object and Longhorn metrics; Grafana shows CPU/memory, nodes,
-pods, Deployment replicas, PV/PVC state and Service metadata. Service inventory
-does not prove application reachability. Alertmanager groups the supplied alerts;
-external notification receivers require configuration.
+The current stack does not collect application logs or Kubernetes event history,
+probe Service reachability, or expose PostgreSQL internals and Vault seal status.
+Scrape-target alerts cannot detect an endpoint that disappears from discovery;
+expected-target inventory and missing-data alerts would close that gap. CPU metrics
+and Kubernetes Service metadata alone cannot establish business availability.
 
-Prometheus, Grafana and Alertmanager run as plain Kubernetes StatefulSets, each
-with a separate Longhorn RWO volume. ConfigMaps provision scraping, alert rules,
-the Grafana data source and a namespace-filtered overview dashboard. A Deployment
-collects Kubernetes object state; a DaemonSet exports metrics from each node.
-This initial setup uses one replica per component and internal Services with local
-port-forward access. It does not replace Metrics Server for HPA or collect logs.
-Application-specific database and Vault health metrics are separate future additions.
+Prometheus, Grafana and Alertmanager each have one replica. Monitoring therefore
+has its own restart/outage windows. Production operation needs alert delivery and
+an independent way to detect a failure of the monitoring stack itself. SLO targets,
+recovery objectives and escalation ownership should be agreed before onboarding
+production clients; none have been measured or committed here.
 
 ## Backups and recovery
 
-Longhorn already provides storage. Its backup target and recurring jobs will be
-configured manually to use a private Hetzner Cloud Object Storage bucket. The
-backup path in the architecture diagram describes this planned setup; no backup
-manifests, schedules, volume-selection labels or credentials are managed here.
+I chose the existing Longhorn backup mechanism with a private **Hetzner Cloud Object
+Storage** bucket as the destination. This reuses the storage platform and keeps
+recovery data outside the cluster. The target, credentials, recurring jobs, selected
+volumes and retention will be configured manually in Longhorn; the repository does
+not install or enable a backup policy.
 
 ```mermaid
 flowchart LR
@@ -224,52 +242,54 @@ flowchart LR
     Hetzner -.->|Restore to new volumes| Recovery["Isolated recovery namespace"]
 ```
 
-Set the bucket's location-specific endpoint, S3 credentials, schedule, retained
-backup count and selected volumes in Longhorn. Hetzner endpoints include
-`fsn1.your-objectstorage.com`, `nbg1.your-objectstorage.com` and
-`hel1.your-objectstorage.com`; use the endpoint matching the bucket's location.
-See [Hetzner's S3 setup](https://docs.hetzner.com/storage/object-storage/getting-started/using-s3-api-tools/)
+Both the Odoo filestore and PostgreSQL volume must be included for every client.
+Grafana/monitoring state can be selected separately. Vault needs a supported snapshot
+and recovery procedure, with unseal material and object-storage credentials available
+outside the cluster. Infrastructure manifests and certificates also need to remain
+recoverable; a volume backup alone cannot rebuild the platform.
+
+Per-volume snapshots are not an atomic application recovery point. For a coordinated
+set, suspend the client's HPA, stop all Odoo writers, wait for transactions to finish,
+and snapshot both volumes before writes resume. Handle detached volumes using
+Longhorn's supported backup procedure, and verify both snapshots upload successfully.
+PostgreSQL data and WAL stay together on one volume; a live restore may require crash
+recovery. This design does not provide database point-in-time recovery.
+
+The regional Hetzner endpoint must match the bucket location. Assign recurring jobs
+to both client volumes in Longhorn. PVC labels are an alternative way to select an
+existing job/group; labels alone do not create schedules. Setup references:
+[Hetzner S3 access](https://docs.hetzner.com/storage/object-storage/getting-started/using-s3-api-tools/)
 and [Longhorn backup targets](https://longhorn.io/docs/1.13.0/snapshots-and-backups/backup-and-restore/set-backup-target/).
-Assign jobs to both client volumes in the Longhorn UI. If selecting jobs through
-PVC labels instead, enable `recurring-job.longhorn.io/source` and select an existing
-job/group; labels alone do not create a schedule.
 
-| Data | Recovery requirement |
+A restore drill must recover a coordinated pair into new volumes in an isolated
+namespace using the matching PostgreSQL major version and Odoo image/addons. Check
+startup, login, business records and attachment downloads before reopening traffic.
+Record the recoverable point and recovery time, and retain the original volumes
+until the restored service is verified. A completed upload is not proof of recovery.
+
+## Delivery, upgrades and validation
+
+Client Helm releases provide a repeatable deployment boundary. I would validate
+changes on one client before a staged rollout rather than update the entire fleet
+together. Client-specific values keep hostnames, database identities and Vault paths
+separate from shared deployment logic. Shared services use plain StatefulSet manifests
+and need their own update procedures.
+
+Odoo major upgrades require compatible database migration and addons. The startup
+guard detects a version mismatch but does not perform migration. Helm rollback
+cannot reverse database schema changes. Take a coordinated recovery set before
+application changes that affect data and verify compatibility before release.
+
+| Area | Evidence and current status |
 | --- | --- |
-| Each client's Odoo and PostgreSQL volumes | Select both; record their volume identities and matching recovery point |
-| Grafana, Prometheus and Alertmanager volumes | Select separately if their saved state/history must be retained |
-| Vault and recovery credentials | Maintain a supported Vault snapshot/recovery procedure and keep unseal material and storage credentials outside the cluster |
-
-Longhorn snapshots are taken per volume. Recurring jobs do not automatically pause
-Odoo or coordinate its filestore with PostgreSQL. For a matched recovery set, stop
-all client Odoo writers with its HPA suspended, wait for transactions to finish,
-then take both snapshots before allowing writes again. PostgreSQL data and WAL
-must remain together on the database volume. If stopping writers detaches a volume,
-use Longhorn's supported detached-volume backup procedure. Live volume recovery can
-require PostgreSQL crash recovery; volume backups do not provide database point-in-time recovery.
-
-After setup, confirm successful remote backups and restore a coordinated pair to
-new volumes in an isolated namespace. Use the matching PostgreSQL major version
-and Odoo image/addons; check database startup, login, records and attachment
-downloads before reopening traffic. Keep the original volumes until recovery is
-verified. A volume backup does not replace Kubernetes manifests, TLS certificates,
-Vault recovery material or access to the object-storage bucket.
-
-## Validation and next steps
-
-| Validation | Status |
-| --- | --- |
-| Helm rendering and configuration checks for all clients | Verified locally |
+| Helm configuration and client profiles | Rendered and checked locally |
 | Fresh initialization, login, attachments, HTTPS and WebSockets | Verified in local containers |
-| Concurrent initialization and sessions/attachments across two replicas | Verified with a local shared volume |
-| HPA reactions, Longhorn RWX, VSO and shared ingress on k3s | Requires cluster verification |
-| Standalone monitoring manifests, configuration and dashboard | Local configuration checks; metric collection requires cluster verification |
-| Longhorn backups to Hetzner Object Storage and restore drill | Planned; manual Longhorn setup and recovery verification required |
+| Concurrent initialization and shared sessions/files | Verified across two containers sharing a local volume |
+| Monitoring configuration and dashboard queries | Local configuration checks; collection on k3s still unverified |
+| HPA, cross-node Longhorn RWX, VSO and shared ingress | Target-cluster verification required |
+| Hetzner backups and application restore | Manual setup and restore drill required |
 
-Use [the verification guide](docs/verification.md) for cluster checks. Before production,
-configure the Longhorn backup plan above, verify coordinated restores and add
-external alert delivery.
-
-For larger fleets, keep client-specific values, upgrade in small batches and measure
-capacity. GitOps and independently managed HA PostgreSQL clusters can be added later
-without sharing PostgreSQL between clients.
+The main gaps before production are cluster verification, coordinated and tested
+backups, external alert delivery, and detection of silent business failures. Full HA
+requires further database and rollout design. The [verification guide](docs/verification.md)
+defines current checks; these gaps remain explicit rather than implied by running pods.

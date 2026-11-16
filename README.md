@@ -155,6 +155,36 @@ If environment overrides are needed, add an ignored `-f cluster.local.yaml` afte
 client values on every install/upgrade. Keep passwords and private keys in Vault.
 The release name `odoo` is reused because each client has a separate namespace.
 
+## What the installation creates
+
+Each client has an Odoo Deployment, a single PostgreSQL StatefulSet, an HPA and
+two separate Longhorn PVCs. With release name `odoo`, the storage is:
+
+| PVC | Container location | Storage |
+| --- | --- | --- |
+| `odoo-odoo-data` | `/var/lib/odoo` | 10 GiB RWX for shared sessions and attachments |
+| `odoo-db-data` | `/var/lib/postgresql/data/pgdata` (PGDATA) | 20 GiB RWO for database files and WAL |
+
+Both Services are internal. Traefik routes normal requests to `odoo-odoo:8069`
+and `/websocket` to `odoo-odoo:8072`. Odoo connects to
+`odoo-db.<client-namespace>.svc.cluster.local:5432`.
+
+Shared ingress is the default. For a dedicated client proxy, append
+`-f clients/client-a/traefik.values.yaml` after the normal client values on both
+install and upgrade, substituting B or C as needed. Exactly one proxy mode must
+be enabled. See [client configuration](docs/clients.md#values-and-overrides).
+
+At startup, the init containers prepare private configuration and check the database.
+An empty database receives the base/web modules and initial administrator without
+demo data. Later pod starts preserve existing users and passwords. Incomplete setup
+or an incompatible Odoo major version blocks startup for recovery or migration.
+
+The HPA scales Odoo between 1 and 4 replicas at 70% average CPU utilization.
+Scale-up permits one additional pod per minute; scale-down stabilizes for five
+minutes before removing at most one pod per minute. PostgreSQL stays at one replica.
+See [scaling and capacity](docs/clients.md#autoscaling-and-capacity) before changing
+replica limits or connection pools.
+
 ## Validate and update
 
 Check the client configuration locally before installation or changes:
@@ -197,9 +227,27 @@ Include both volumes for every client. Configure the bucket, regional endpoint,
 credentials, recurring jobs, volume selection and retention in Longhorn. Keep
 credentials outside Git and verify completed uploads and restores.
 
+Use the endpoint matching the bucket's location:
+
+| Location | S3 endpoint |
+| --- | --- |
+| Falkenstein | `https://fsn1.your-objectstorage.com` |
+| Nuremberg | `https://nbg1.your-objectstorage.com` |
+| Helsinki | `https://hel1.your-objectstorage.com` |
+
+Assign the recurring job/group to both client volumes in Longhorn. If using PVC
+labels instead, `recurring-job.longhorn.io/source=enabled` allows Longhorn to sync
+their job/group selection to the volumes; the selected job/group must already exist.
+The chart currently does not apply backup-selection labels.
+
 Separate volume backups are not an atomic Odoo recovery point. A coordinated
 backup must preserve matching database records and attachments; see the
 [backup design and restore checks](DESIGN.md#backups-and-recovery).
+
+The client PVCs are retained on Helm uninstall, but namespace deletion or storage
+loss can still remove them. Retention and Longhorn replication do not replace
+remote backups. Importing an existing RWO application volume requires copying data
+to an RWX claim selected with `odoo.storage.existingClaim`; fresh installs need no migration.
 
 ## Verify the deployment
 
